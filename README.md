@@ -9,6 +9,12 @@ La detección usa **solo audio y video** (intensidad de audio, gritos/picos,
 risas, movimiento de cámara, cambios de escena) — no hay transcripción ni
 modelos de lenguaje involucrados, así que es rápida y no necesita GPU.
 
+## Vista de la aplicación
+
+<p align="center">
+  <img src="docs/images/puppywill-ai-clipper-interface.png" alt="Interfaz principal de Puppywill AI Clipper para analizar, previsualizar y exportar momentos destacados" width="100%">
+</p>
+
 ## ✨ Funciones
 
 - **Detección de mejores momentos** combinando picos de audio, risas,
