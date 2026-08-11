@@ -1,0 +1,15 @@
+# Puppywill AI Clipper — dependencias
+#
+# Instala con:
+#   pip install -r requirements.txt
+#
+# NVENC (exportación acelerada por GPU NVIDIA) es opcional: si no está
+# disponible, FFmpeg cae automáticamente a codificación por CPU (libx264).
+# No hace falta instalar PyTorch ni ningún framework de IA: la detección de
+# momentos usa solo análisis de audio (numpy) y video (OpenCV).
+
+PySide6>=6.7,<7.0
+PySide6-Addons>=6.7,<7.0     # incluye QtMultimedia / QtMultimediaWidgets para la vista previa
+
+opencv-python>=4.9
+numpy>=1.26,<2.0

@@ -1,0 +1,78 @@
+# --- Video / clips generados -------------------------------------------
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.wav
+*.ass
+*.pwproj
+
+# --- Carpetas de exportación / grabaciones -------------------------------
+/Clips/
+/clips/
+/PuppywillClips/
+/output/
+/exports/
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Entornos virtuales -----------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+
+# --- Modelos de IA / cachés de librerías pesadas ---------------------------
+*.pt
+*.pth
+*.onnx
+*.bin
+*.ckpt
+*.safetensors
+.cache/
+
+# --- Configuración local / ajustes personales del usuario ------------------
+settings.json
+.claude/settings.local.json
+launcher_error.log
+*.log
+
+# --- Credenciales / secretos ------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+token*
+
+# --- Build / distribución ----------------------------------------------------
+build/
+dist/
+*.spec
+*.exe
+*.msi
+
+# --- Temporales / caché del sistema -----------------------------------------
+*.tmp
+*.temp
+tmp/
+temp/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- IDE / editor -------------------------------------------------------------
+.vscode/
+.idea/
