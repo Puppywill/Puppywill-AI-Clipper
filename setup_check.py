@@ -12,6 +12,7 @@ Revisa:
   - FFmpeg / FFprobe en el PATH
   - GPU NVIDIA (vía nvidia-smi, opcional)
   - Soporte NVENC de FFmpeg (para exportación acelerada por GPU, opcional)
+  - Tesseract OCR (opcional, mejora el conteo de multikills)
   - Paquetes de requirements.txt instalados o no
 
 No instala nada por sí mismo: solo diagnostica, para que decidas con
@@ -73,6 +74,20 @@ def main():
             pass
     else:
         check("nvidia-smi disponible", False, "revisa que los drivers NVIDIA estén instalados")
+
+    # Tesseract OCR (opcional: solo informativo, no bloquea nada - ver
+    # app/core/kill_events.py, que busca en PATH y en la ruta estándar de
+    # instalación en Windows)
+    tesseract_path = shutil.which("tesseract")
+    if not tesseract_path:
+        import os
+        for candidate in (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                          r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"):
+            if os.path.isfile(candidate):
+                tesseract_path = candidate
+                break
+    check("Tesseract OCR (opcional, mejora el conteo de multikills)", bool(tesseract_path),
+          tesseract_path or "sin esto, la detección de kills usa solo audio + actividad visual, funciona igual")
 
     # Paquetes clave (estos SÍ son obligatorios para poder ejecutar la app)
     required_packages_ok = True

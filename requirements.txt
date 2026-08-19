@@ -13,3 +13,12 @@ PySide6-Addons>=6.7,<7.0     # incluye QtMultimedia / QtMultimediaWidgets para l
 
 opencv-python>=4.9
 numpy>=1.26,<2.0
+
+# Refuerzo OPCIONAL para la detección de kills: si además instalas el
+# binario de Tesseract OCR (winget install UB-Mannheim.TesseractOCR, o
+# https://github.com/UB-Mannheim/tesseract/wiki), el detector lee el texto
+# del kill feed para contar multikills con más precisión. Sin Tesseract
+# instalado, la detección de kills sigue funcionando igual (señal de audio +
+# actividad visual por ráfagas) - pytesseract solo no hace nada si no
+# encuentra el binario.
+pytesseract>=0.3.10

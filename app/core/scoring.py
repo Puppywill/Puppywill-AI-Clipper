@@ -1,17 +1,19 @@
 """
 scoring.py
 ----------
-Combina las señales de audio_analysis y visual_analysis en una sola
-curva de "score" a lo largo de todo el stream, encuentra los picos de
-mayor intensidad (la "jugada"), y construye alrededor de cada uno un
-clip con estructura: preparación breve -> jugada principal -> cierre/
-reacción, en vez de una ventana centrada a ciegas en el pico.
+Combina las señales de audio_analysis, visual_analysis y (si está
+disponible) kill_events en una sola curva de "score" a lo largo de todo
+el stream, encuentra los picos de mayor intensidad (la "jugada"), y
+construye alrededor de cada uno un clip con estructura: preparación
+breve -> jugada principal -> cierre/reacción, en vez de una ventana
+centrada a ciegas en el pico.
 
 La idea general:
-  score(t) = w_audio_peak   * peak_score(t)
-           + w_laughter     * laughter_score(t)
-           + w_motion       * motion_score(t)
-           + w_scene_cut    * scene_cut_score(t)
+  score(t) = w_audio_peak     * peak_score(t)
+           + w_laughter       * laughter_score(t)
+           + w_motion         * motion_score(t)
+           + w_scene_cut      * scene_cut_score(t)
+           + w_kill_activity  * kill_activity(t)      (opcional)
 
 A partir de score(t):
   1. Se detectan los picos (segundo exacto de mayor intensidad), más
@@ -22,15 +24,19 @@ A partir de score(t):
      desplazamiento del ancla para que los bordes caigan en tramos
      tranquilos (evita cortar a mitad de una acción sin resolución).
   3. Cada ventana recibe una puntuación de calidad 0..100 que premia
-     forma "sube -> pico -> baja" (jugada + resultado) y penaliza bordes
-     con acción sin resolver y solapamiento con tramos estáticos
-     (menús, respawn, espera).
-  4. Se agrupan picos cercanos (misma jugada) y se entregan solo los
-     mejores y más distintos.
+     forma "sube -> pico -> baja" (jugada + resultado), reacción fuerte
+     tras el pico y pelea sostenida, y penaliza bordes con acción sin
+     resolver y solapamiento con tramos estáticos (menús, respawn,
+     espera).
+  4. Se agrupan picos cercanos (misma jugada/pelea) y se entregan solo
+     los mejores y más distintos, ordenados de mayor a menor puntuación.
+  5. Si hay señal de kills (ver kill_events.py), se cuentan los kills
+     dentro de cada clip aceptado -> etiqueta "Kill" o "Multikill" (2+
+     kills agrupados en un solo clip, no clips separados de la misma
+     pelea). El clip de mayor puntuación se marca "Best Play".
 
-`tag_reasons` añade después las etiquetas legibles ("Pico de audio",
-"Acción alta", "Reacción", "Cierre detectado") inspeccionando las
-señales de audio/video crudas alrededor de cada momento aceptado.
+`tag_reasons` complementa esas etiquetas con "Reaction" cuando hay
+energía de voz/movimiento elevada justo después del pico.
 """
 from __future__ import annotations
 
@@ -48,6 +54,7 @@ class ScoreWeights:
     laughter: float = 0.8
     motion: float = 0.7
     scene_cut: float = 0.5
+    kill_activity: float = 1.2   # el sonido/HUD de eliminación es la señal más directa de "esto importa"
 
 
 @dataclass
@@ -57,6 +64,7 @@ class Moment:
     score: float                          # 0..100, calidad general del clip (no solo intensidad del pico)
     peak_time: float                      # segundo exacto de mayor intensidad detectada
     reasons: list[str] = field(default_factory=list)
+    kill_count: int = 0                   # kills detectados dentro de [start, end] (ver kill_events.py)
 
 
 # El pico cae ~67% del clip: preparación + jugada antes, cierre/reacción
@@ -69,8 +77,10 @@ PRE_ROLL_RATIO = 2.0 / 3.0
 _RATIO_VARIANTS = (0.60, 0.65, 0.70, 0.75)
 
 
-def _resample_to_grid(times: np.ndarray, values: np.ndarray, grid: np.ndarray) -> np.ndarray:
-    """Interpola linealmente `values(times)` sobre una rejilla temporal común `grid`."""
+def resample_to_grid(times: np.ndarray, values: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """Interpola linealmente `values(times)` sobre una rejilla temporal común `grid`.
+    Pública porque moment_detector.py también la usa para alinear la señal
+    de kills (ver kill_events.py) a la misma rejilla que find_top_moments."""
     if len(times) == 0:
         return np.zeros_like(grid)
     return np.interp(grid, times, values, left=values[0], right=values[-1])
@@ -79,6 +89,8 @@ def _resample_to_grid(times: np.ndarray, values: np.ndarray, grid: np.ndarray) -
 def build_unified_score(
     audio: AudioFeatures,
     visual: Optional[VisualFeatures] = None,
+    kill_times: Optional[np.ndarray] = None,
+    kill_activity: Optional[np.ndarray] = None,
     weights: ScoreWeights = ScoreWeights(),
     grid_step: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -87,6 +99,11 @@ def build_unified_score(
     grid_step debe coincidir (o ser múltiplo) de WINDOW_SECONDS de audio_analysis
     para máxima fidelidad, pero funciona igual si no coincide gracias a la
     interpolación.
+
+    `kill_times`/`kill_activity` son opcionales (ver `kill_events.py`): si se
+    pasan, la señal de kills se suma igual que motion/scene_cut. Si no hay
+    detección de kills disponible (p.ej. video de otro juego), el score
+    combinado sigue funcionando exactamente igual que antes.
     """
     duration = audio.duration_sec
     if visual is not None and visual.duration_sec > 0:
@@ -96,15 +113,19 @@ def build_unified_score(
     if len(grid) == 0:
         grid = np.array([0.0], dtype=np.float32)
 
-    peak = _resample_to_grid(audio.times, audio.peak_score, grid)
-    laugh = _resample_to_grid(audio.times, audio.laughter_score, grid)
+    peak = resample_to_grid(audio.times, audio.peak_score, grid)
+    laugh = resample_to_grid(audio.times, audio.laughter_score, grid)
 
     score = weights.audio_peak * peak + weights.laughter * laugh
 
     if visual is not None and len(visual.times) > 0:
-        motion = _resample_to_grid(visual.times, visual.motion_score, grid)
-        scene = _resample_to_grid(visual.times, visual.scene_cut_score, grid)
+        motion = resample_to_grid(visual.times, visual.motion_score, grid)
+        scene = resample_to_grid(visual.times, visual.scene_cut_score, grid)
         score = score + weights.motion * motion + weights.scene_cut * scene
+
+    if kill_times is not None and kill_activity is not None and len(kill_activity) > 0:
+        kill = resample_to_grid(kill_times, kill_activity, grid)
+        score = score + weights.kill_activity * kill
 
     # normalizar a 0..100 para que sea legible en la UI
     if score.max() > 0:
@@ -215,12 +236,14 @@ def _find_peak_times(
 
 def _window_quality(
     grid: np.ndarray, score: np.ndarray, static_mask: np.ndarray,
-    start: float, end: float, peak_val: float,
+    start: float, end: float, peak_time: float, peak_val: float,
 ) -> float:
     """Puntuación de calidad 0..100 de una ventana concreta: fuerza del
-    pico + forma "sube -> pico -> baja" (jugada + resultado), menos
-    penalización por cortar los bordes en medio de acción sin resolver
-    y por solapar con tramos estáticos (menús/espera/respawn)."""
+    pico + forma "sube -> pico -> baja" (jugada + resultado), más bonus
+    por reacción fuerte justo después del pico y por pelea sostenida
+    (gran parte de la ventana con intensidad alta, no solo un instante),
+    menos penalización por cortar los bordes en medio de acción sin
+    resolver y por solapar con tramos estáticos (menús/espera/respawn)."""
     mask = (grid >= start) & (grid <= end)
     if not np.any(mask):
         return 0.0
@@ -244,8 +267,35 @@ def _window_quality(
     static_frac = float(np.mean(static_mask[mask])) if np.any(mask) else 0.0
     static_penalty = static_frac * 35.0
 
-    quality = peak_val * 0.55 + shape_bonus - boundary_penalty - static_penalty
+    # premia reacción fuerte en los segundos justo después del pico (grito,
+    # risa, movimiento de cámara) - no solo lo etiqueta, también puntúa
+    reaction_s, reaction_e = peak_time + 0.5, min(end, peak_time + 6.0)
+    rmask = (grid >= reaction_s) & (grid <= reaction_e)
+    reaction_level = float(np.mean(score[rmask])) if np.any(rmask) else 0.0
+    reaction_bonus = min(12.0, reaction_level * 0.15)
+
+    # premia "pelea intensa": gran parte de la ventana (no solo el pico)
+    # se mantiene en intensidad alta
+    intense_frac = float(np.mean(w > 55.0))
+    intense_bonus = intense_frac * 15.0
+
+    quality = peak_val * 0.55 + shape_bonus - boundary_penalty - static_penalty + reaction_bonus + intense_bonus
     return float(np.clip(quality, 0.0, 100.0))
+
+
+def _count_kills_in_window(kill_event_times: list[float], start: float, end: float) -> int:
+    """Cuenta cuántos kills distintos caen dentro de [start, end].
+
+    Cuenta directamente sobre los EVENTOS discretos ya detectados por
+    `kill_events.py` (cada uno ya es un pico de audio confirmado, o una
+    lectura de OCR) en vez de volver a buscar picos sobre la curva
+    continua `kill_activity`: esa curva ya está reinterpolada a la
+    rejilla de 0.5s y mezclada con la señal visual (más ruidosa), así
+    que contar ahí puede perder eliminaciones muy juntas (un multikill
+    real puede tener apenas 1-2s entre eliminaciones) o contar ruido
+    visual como si fuera un kill. Los eventos ya vienen deduplicados
+    desde el detector, así que no hace falta NMS aquí."""
+    return sum(1 for t in kill_event_times if start <= t <= end)
 
 
 def find_top_moments(
@@ -254,18 +304,28 @@ def find_top_moments(
     clip_len_options: tuple[int, ...] = (15, 30, 45, 60),
     max_moments: int = 15,
     min_gap_seconds: float = 20.0,
+    kill_event_times: Optional[list[float]] = None,
 ) -> list[Moment]:
     """Encuentra los mejores momentos: detecta picos de intensidad
     (más candidatos de los que se entregan), construye para cada uno la
     mejor ventana entre las duraciones candidatas (pico ~60-75% del
     clip, bordes en tramos tranquilos), puntúa su calidad 0..100, y
     entrega solo los mejores y más distintos (picos cercanos = misma
-    jugada, se quedan con uno solo)."""
+    jugada, se quedan con uno solo), ordenados de mayor a menor
+    puntuación.
+
+    `kill_event_times` (opcional, ver kill_events.py: `[e.time for e in
+    kill_feats.events]`) son los instantes exactos de kills ya detectados
+    - se usan para contar kills por clip (Kill/Multikill) y para marcar
+    el mejor momento como "Best Play". La señal continua de kills (para
+    el score en sí) se suma antes, en build_unified_score.
+    """
     if len(grid) < 2:
         return []
 
     video_duration = float(grid[-1])
     static_mask = _static_mask(grid, score)
+    have_kills = bool(kill_event_times)
 
     n_peak_candidates = max(max_moments * 4, 20)
     peak_candidates = _find_peak_times(
@@ -277,16 +337,16 @@ def find_top_moments(
         best = None
         for length_sec in clip_len_options:
             start, end = compute_clip_window(peak_time, length_sec, video_duration, grid, score)
-            quality = _window_quality(grid, score, static_mask, start, end, peak_val)
+            quality = _window_quality(grid, score, static_mask, start, end, peak_time, peak_val)
             if best is None or quality > best[0]:
                 best = (quality, start, end)
         quality, start, end = best
         scored.append(Moment(start=start, end=end, score=quality, peak_time=peak_time))
 
-    # ordenar por calidad y agrupar picos cercanos (misma jugada): solo
-    # el segundo exacto del pico decide si dos candidatos son "la misma
-    # jugada", igual que antes - las ventanas en sí pueden solaparse un
-    # poco por el pre-roll generoso, eso es normal y esperado
+    # agrupar picos cercanos (misma jugada): solo el segundo exacto del
+    # pico decide si dos candidatos son "la misma jugada" - las ventanas
+    # en sí pueden solaparse un poco por el pre-roll generoso, eso es
+    # normal y esperado
     scored.sort(key=lambda m: m.score, reverse=True)
 
     accepted: list[Moment] = []
@@ -297,50 +357,48 @@ def find_top_moments(
         if len(accepted) >= max_moments:
             break
 
-    accepted.sort(key=lambda m: m.start)
+    if have_kills:
+        for m in accepted:
+            m.kill_count = _count_kills_in_window(kill_event_times, m.start, m.end)
+            if m.kill_count >= 2:
+                m.reasons.append("Multikill")
+            elif m.kill_count == 1:
+                m.reasons.append("Kill")
+
+    intense_threshold = 55.0
+    for m in accepted:
+        wmask = (grid >= m.start) & (grid <= m.end)
+        if np.any(wmask) and float(np.mean(score[wmask] > intense_threshold)) >= 0.5:
+            m.reasons.append("Intense Fight")
+
+    # ordenar por puntuación (de mejor a peor) para mostrarlos así en la UI
+    accepted.sort(key=lambda m: m.score, reverse=True)
+    if accepted:
+        accepted[0].reasons.insert(0, "Best Play")
+
     return accepted
 
 
 def tag_reasons(moment: Moment, audio: AudioFeatures, visual: Optional[VisualFeatures]) -> None:
-    """Etiquetas legibles para explicar la puntuación de calidad:
-    'Pico de audio' (grito/pico de volumen justo en la jugada),
-    'Acción alta' (movimiento visual intenso en la jugada), 'Reacción'
-    (subida de energía de voz/movimiento justo después del pico, típica
-    de la reacción del streamer) y 'Cierre detectado' (la intensidad
-    baja hacia el final del clip: hay resolución, no corta a mitad de
-    acción)."""
+    """Añade 'Reaction' si hay energía de voz/movimiento elevada justo
+    DESPUÉS del pico (típica de la reacción del streamer tras la jugada).
+    Complementa (no reemplaza) las etiquetas que ya puso `find_top_moments`
+    ('Kill'/'Multikill', 'Intense Fight', 'Best Play'); si al final no hay
+    ninguna etiqueta, se añade un texto genérico para no dejar la lista
+    vacía."""
     def _avg(times, values, s, e):
         if times is None or len(times) == 0:
             return 0.0
         mask = (times >= s) & (times <= e)
         return float(np.mean(values[mask])) if np.any(mask) else 0.0
 
-    win_s, win_e = moment.peak_time - 2.0, moment.peak_time + 2.0
-    reasons: list[str] = []
-
-    peak_audio = _avg(audio.times, audio.peak_score, win_s, win_e)
-    if peak_audio > 0.35:
-        reasons.append("Pico de audio")
-
-    peak_motion = _avg(visual.times, visual.motion_score, win_s, win_e) if visual is not None else 0.0
-    if peak_motion > 0.35:
-        reasons.append("Acción alta")
-
-    # reacción: energía de voz/movimiento elevada justo DESPUÉS del pico
     reaction_s = moment.peak_time + 0.5
     reaction_e = min(moment.end, moment.peak_time + 6.0)
     reaction_audio = _avg(audio.times, audio.peak_score, reaction_s, reaction_e)
     reaction_laugh = _avg(audio.times, audio.laughter_score, reaction_s, reaction_e)
     reaction_motion = _avg(visual.times, visual.motion_score, reaction_s, reaction_e) if visual is not None else 0.0
     if max(reaction_audio, reaction_laugh) > 0.30 or reaction_motion > 0.30:
-        reasons.append("Reacción")
+        moment.reasons.append("Reaction")
 
-    # cierre: la intensidad baja hacia el final del clip respecto al pico
-    tail_s = max(moment.peak_time + 2.0, moment.end - 5.0)
-    tail_audio = _avg(audio.times, audio.peak_score, tail_s, moment.end)
-    if tail_audio < 0.30 and peak_audio > tail_audio:
-        reasons.append("Cierre detectado")
-
-    if not reasons:
-        reasons.append("Combinación moderada de señales")
-    moment.reasons = reasons
+    if not moment.reasons:
+        moment.reasons.append("Combinación moderada de señales")
