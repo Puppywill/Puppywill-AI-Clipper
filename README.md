@@ -10,8 +10,40 @@ título, subtítulos, efectos y música los agregas tú después.
 La detección usa **audio y video** (intensidad de audio, el sonido de
 confirmación de eliminación, risas, movimiento de cámara, cambios de
 escena, y opcionalmente el kill feed en pantalla) — no hay transcripción
-de voz ni modelos de lenguaje involucrados, así que es rápida y no
-necesita GPU. **Analiza grabaciones que ya tienes; no graba tu pantalla.**
+de voz ni modelos de lenguaje involucrados. **Analiza grabaciones que ya
+tienes; no graba tu pantalla.**
+
+## Windows Desktop Application
+
+Puppywill AI Clipper es una **aplicación de escritorio nativa para
+Windows** (interfaz gráfica con PySide6/Qt, no una web app ni un
+servicio en la nube), pensada para correr localmente sobre tus propias
+grabaciones. Incluye:
+
+- **Interfaz gráfica profesional**, con tema oscuro, vista previa
+  integrada y una ventana única para analizar, revisar y exportar.
+- **Análisis acelerado con NVIDIA GPU/NVDEC** (`ffmpeg -hwaccel cuda`,
+  incluye AV1 además de H.264/HEVC) para decodificar el video mucho más
+  rápido que por CPU; si no hay GPU NVIDIA disponible, cae a CPU
+  automáticamente sin que tengas que configurar nada.
+- **Modos Rápido y Preciso**, elegibles desde la barra lateral: Rápido
+  (predeterminado) para streams largos, Preciso para un muestreo más
+  denso.
+- **Detección de mejores momentos, kills, multikills y reacciones**,
+  combinando audio, video y (opcionalmente) OCR del kill feed en una
+  sola puntuación de calidad con etiquetas legibles.
+- **Vista previa y ajuste manual** del inicio/fin de cada clip antes de
+  exportar.
+- **Selección y exportación de varios clips a la vez**: marca los que
+  quieras, elige una carpeta de destino una sola vez, y se exportan
+  todos con nombres únicos.
+- **Exportación en 9:16, 16:9 y 1:1**, lista para subir a redes o seguir
+  editando en CapCut.
+
+> **Estado actual:** este repositorio contiene el **código fuente** y las
+> instrucciones de instalación (ver [📦 Instalación](#-instalación) más
+> abajo) - todavía no hay un instalador ni un ejecutable `.exe`
+> distribuible, así que por ahora se ejecuta desde el código con Python.
 
 ## Vista de la aplicación
 
