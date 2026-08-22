@@ -65,33 +65,57 @@ def format_time(seconds: float) -> str:
 class MomentListItemWidget(QWidget):
     """Widget custom para cada fila de la lista de momentos: casilla de
     selección (para exportar varios a la vez), rango de tiempo, badge de
-    score y razones detectadas (audio/movimiento/escena)."""
+    score y razones detectadas (audio/movimiento/escena). Suficiente
+    alto/espaciado para que nada quede cortado ni amontonado, y un
+    resaltado propio (borde+fondo dorado) cuando está marcado con la
+    casilla - distinto del resaltado morado que usa la lista al hacer
+    clic para previsualizar, para no confundir ambos estados."""
 
     def __init__(self, moment, index: int, on_toggle=None):
         super().__init__()
         self.moment = moment
         self.index = index
+        self.setObjectName("MomentCard")
+        self.setMinimumHeight(78)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(10, 10, 12, 10)
+        layout.setSpacing(6)
 
         top_row = QHBoxLayout()
+        top_row.setSpacing(10)
         self.checkbox = QCheckBox()
+        self.checkbox.setObjectName("MomentCheckbox")
         self.checkbox.setToolTip("Seleccionar para exportar junto a otros momentos marcados")
         if on_toggle is not None:
+            self.checkbox.toggled.connect(self._on_toggled)
             self.checkbox.toggled.connect(lambda checked: on_toggle(index, checked))
         top_row.addWidget(self.checkbox)
+
         time_label = QLabel(f"#{index+1}  {format_time(moment.start)} – {format_time(moment.end)}")
-        time_label.setStyleSheet("font-weight: 600;")
-        score_label = QLabel(f"{moment.score:.0f}")
-        score_label.setObjectName("ScoreBadge")
+        time_label.setStyleSheet("font-weight: 600; font-size: 13px;")
         top_row.addWidget(time_label)
         top_row.addStretch()
+
+        score_label = QLabel(f"{moment.score:.0f}")
+        score_label.setObjectName("ScoreBadge")
         top_row.addWidget(score_label)
         layout.addLayout(top_row)
 
         reasons_label = QLabel(" · ".join(moment.reasons))
-        reasons_label.setStyleSheet(f"color: {ACCENT_2}; font-size: 11px;")
+        reasons_label.setWordWrap(True)
+        reasons_label.setStyleSheet(f"color: {ACCENT_2}; font-size: 11px; padding-left: 28px;")
         layout.addWidget(reasons_label)
+
+    def _on_toggled(self, checked: bool):
+        # dispara el re-cálculo del QSS con el nuevo valor de la property
+        # dinámica "checkedState" (ver #MomentCard[checkedState="true"] en
+        # styles.py) - unpolish/polish es lo que Qt requiere para que un
+        # cambio de property en tiempo de ejecución se refleje sin reabrir
+        # la ventana.
+        self.setProperty("checkedState", "true" if checked else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class MainWindow(QMainWindow):
@@ -233,18 +257,28 @@ class MainWindow(QMainWindow):
         self.video_info_label.setStyleSheet("color: #8E8EA0; font-size: 12px;")
         lay.addWidget(self.video_info_label)
 
-        lay.addWidget(self._section_title("MEJORES MOMENTOS DETECTADOS"))
+        header_row = QHBoxLayout()
+        header_row.addWidget(self._section_title("MEJORES MOMENTOS DETECTADOS"))
+        header_row.addStretch()
+        self.selection_count_label = QLabel("Ningún clip seleccionado")
+        self.selection_count_label.setStyleSheet(
+            "color: #8E8EA0; font-size: 11px; padding: 10px 4px 4px 4px;"
+        )
+        header_row.addWidget(self.selection_count_label)
+        lay.addLayout(header_row)
+
         self.moment_list = QListWidget()
         self.moment_list.itemClicked.connect(self.on_moment_selected)
         lay.addWidget(self.moment_list, 1)
 
         selection_row = QHBoxLayout()
-        self.btn_select_all = QPushButton("☑ Seleccionar todos")
+        selection_row.setSpacing(8)
+        self.btn_select_all = QPushButton("☑  Seleccionar todos")
+        self.btn_deselect_all = QPushButton("☐  Deseleccionar todos")
         self.btn_select_all.clicked.connect(self.on_select_all_clicked)
-        self.btn_deselect_all = QPushButton("☐ Deseleccionar todos")
         self.btn_deselect_all.clicked.connect(self.on_deselect_all_clicked)
-        selection_row.addWidget(self.btn_select_all)
-        selection_row.addWidget(self.btn_deselect_all)
+        selection_row.addWidget(self.btn_select_all, 1)
+        selection_row.addWidget(self.btn_deselect_all, 1)
         lay.addLayout(selection_row)
 
         self.btn_export_selected = QPushButton("⬇  Exportar seleccionados")
@@ -470,6 +504,13 @@ class MainWindow(QMainWindow):
         n = len(self.selected_moment_indices)
         self.btn_export_selected.setText(f"⬇  Exportar seleccionados ({n})" if n else "⬇  Exportar seleccionados")
         self.btn_export_selected.setEnabled(n > 0)
+        total = len(self._moment_widgets)
+        if n == 0:
+            self.selection_count_label.setText("Ningún clip seleccionado")
+        elif n == total:
+            self.selection_count_label.setText(f"Los {n} clips seleccionados")
+        else:
+            self.selection_count_label.setText(f"{n} de {total} clips seleccionados")
 
     def on_select_all_clicked(self):
         for w in self._moment_widgets:
@@ -766,22 +807,25 @@ class MainWindow(QMainWindow):
         failed_results = [r for r in results if not r.ok]
         dest_dir = getattr(self, "_batch_dest_dir", "")
 
-        self.log_label.setText(
-            f"Exportación por lotes: {len(ok_results)}/{total} completados"
-            + (f", {len(failed_results)} fallaron." if failed_results else ".")
-        )
+        if failed_results:
+            self.log_label.setText(
+                f"{len(ok_results)} de {total} clips exportados correctamente "
+                f"({len(failed_results)} fallaron)."
+            )
+        else:
+            self.log_label.setText(f"{len(ok_results)} de {total} clips exportados correctamente.")
 
         if failed_results:
             failed_lines = "\n".join(f"• {r.job.label}: {r.error[:200]}" for r in failed_results)
             QMessageBox.warning(
                 self, APP_NAME,
-                f"Se exportaron {len(ok_results)} de {total} clips en:\n{dest_dir}\n\n"
+                f"{len(ok_results)} de {total} clips exportados correctamente en:\n{dest_dir}\n\n"
                 f"Fallaron {len(failed_results)}:\n{failed_lines}"
             )
         else:
             QMessageBox.information(
                 self, APP_NAME,
-                f"Se exportaron {len(ok_results)} clip(s) en:\n{dest_dir}"
+                f"{len(ok_results)} de {total} clips exportados correctamente en:\n{dest_dir}"
             )
         # el video, los resultados del análisis y la selección de casillas
         # quedan intactos: se puede seguir reproduciendo, ajustando y

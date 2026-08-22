@@ -97,12 +97,43 @@ QListWidget::item {{
     background-color: {BG_CARD};
     border: 1px solid {BORDER};
     border-radius: 8px;
-    padding: 10px;
-    margin: 4px 2px;
+    padding: 4px;
+    margin: 5px 2px;
 }}
 QListWidget::item:selected {{
     border-color: {ACCENT};
     background-color: #2A2140;
+}}
+
+/* Tarjeta de cada momento (dentro de un QListWidget::item, ver arriba).
+   Transparente por defecto - hereda el fondo/borde del item; cuando se
+   marca la casilla, se resalta con un tinte y borde dorados (mismo
+   acento que ya se usa en el badge de puntuación y las etiquetas),
+   distinto del morado que usa el item al hacer clic para previsualizar,
+   para no confundir "marcado para exportar" con "en vista previa". */
+#MomentCard {{
+    background-color: transparent;
+    border-radius: 6px;
+    border: 1px solid transparent;
+}}
+#MomentCard[checkedState="true"] {{
+    background-color: rgba(245, 185, 66, 0.14);
+    border: 1px solid {ACCENT_2};
+}}
+
+QCheckBox#MomentCheckbox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 2px solid {BORDER};
+    background-color: {BG_DARK};
+}}
+QCheckBox#MomentCheckbox::indicator:hover {{
+    border-color: {ACCENT_2};
+}}
+QCheckBox#MomentCheckbox::indicator:checked {{
+    border-color: {ACCENT_2};
+    background-color: {ACCENT_2};
 }}
 
 QProgressBar {{
