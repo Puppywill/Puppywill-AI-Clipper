@@ -13,10 +13,12 @@ streams de 3+ horas porque procesamos en float32 vectorizado con numpy.
 from __future__ import annotations
 
 import subprocess
-import shutil
+import time
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
+
+from .proc_utils import CancelCheck, check_cancel, ffmpeg_bin, popen_hidden
 
 
 SAMPLE_RATE = 16000          # mono 16kHz es suficiente para el análisis de energía y es rápido de decodificar
@@ -24,34 +26,33 @@ WINDOW_SECONDS = 0.5          # resolución temporal del análisis de energía
 HOP_SECONDS = 0.5              # sin solape para rapidez; se puede bajar a 0.25 para más precisión
 
 
-def _ffmpeg_bin() -> str:
-    exe = shutil.which("ffmpeg")
-    if not exe:
-        raise RuntimeError(
-            "No se encontró FFmpeg en el PATH. Instálalo desde https://ffmpeg.org/download.html "
-            "o con 'winget install ffmpeg' en Windows."
-        )
-    return exe
-
-
-def extract_audio_wav(video_path: str, out_wav_path: str, sample_rate: int = SAMPLE_RATE) -> str:
+def extract_audio_wav(video_path: str, out_wav_path: str, sample_rate: int = SAMPLE_RATE,
+                       cancel_check: CancelCheck = None) -> str:
     """Extrae el audio completo del video a un WAV mono PCM16 a `sample_rate` Hz,
-    para el análisis de energía (picos, risas)."""
-    ffmpeg = _ffmpeg_bin()
+    para el análisis de energía (picos, risas). `-vn` hace que FFmpeg no
+    toque la pista de video en absoluto, así que esto es rápido sin
+    importar cuán largo sea el video ni qué códec de video use (AV1
+    incluido)."""
+    ffmpeg = ffmpeg_bin()
     out_wav_path = str(out_wav_path)
     Path(out_wav_path).parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        ffmpeg, "-y", "-i", str(video_path),
+        ffmpeg, "-y", "-nostats", "-loglevel", "error", "-i", str(video_path),
         "-vn",                      # sin video
         "-ac", "1",                  # mono
         "-ar", str(sample_rate),     # sample rate
         "-acodec", "pcm_s16le",
         out_wav_path,
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = popen_hidden(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    while proc.poll() is None:
+        check_cancel(cancel_check, proc)
+        time.sleep(0.2)
+    check_cancel(cancel_check, proc)
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg falló extrayendo audio:\n{proc.stderr.decode(errors='ignore')}")
+        stderr = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
+        raise RuntimeError(f"FFmpeg falló extrayendo audio:\n{stderr}")
     return out_wav_path
 
 

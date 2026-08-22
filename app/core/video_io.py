@@ -8,10 +8,10 @@ usuario de problemas antes de lanzar un análisis de 3 horas.
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from .proc_utils import ffprobe_bin, run_hidden
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mkv", ".mov"}
 MIN_DURATION_SECONDS_WARN = 3 * 60 * 60  # 3 horas: solo un aviso informativo, no bloqueante
@@ -34,15 +34,6 @@ class VideoValidationError(Exception):
     pass
 
 
-def _ffprobe_bin() -> str:
-    exe = shutil.which("ffprobe")
-    if not exe:
-        raise RuntimeError(
-            "No se encontró FFprobe (parte de FFmpeg) en el PATH. Instala FFmpeg completo."
-        )
-    return exe
-
-
 def validate_and_probe(path: str) -> VideoInfo:
     p = Path(path)
     if not p.exists():
@@ -52,13 +43,13 @@ def validate_and_probe(path: str) -> VideoInfo:
             f"Formato no soportado '{p.suffix}'. Usa MP4, MKV o MOV."
         )
 
-    ffprobe = _ffprobe_bin()
+    ffprobe = ffprobe_bin()
     cmd = [
         ffprobe, "-v", "error", "-show_entries",
         "format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate",
         "-of", "json", str(p),
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = run_hidden(cmd)
     if proc.returncode != 0:
         raise VideoValidationError(
             f"No se pudo leer el video (¿archivo corrupto?): {proc.stderr.decode(errors='ignore')}"

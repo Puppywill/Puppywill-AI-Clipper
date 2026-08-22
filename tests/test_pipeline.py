@@ -61,10 +61,19 @@ def test_audio_visual_scoring(tmp_dir: Path):
     grid, score = scoring.build_unified_score(af, vf)
     moments = scoring.find_top_moments(grid, score, clip_len_options=(15, 30), max_moments=6, min_gap_seconds=15.0)
 
-    assert len(moments) == 3, f"se esperaban 3 momentos, se encontraron {len(moments)}"
+    # Al menos los 3 picos conocidos deben aparecer, y deben ser los de MAYOR
+    # puntuación (no solo "aparecer en algún lado"): distintos backends de
+    # decode (GPU/CPU/OpenCV) pueden diferir en un candidato adicional de
+    # puntuación baja cerca del ruido (p.ej. el patrón sintético de testsrc
+    # generando un scene-cut borde de video ligeramente distinto según qué
+    # build de FFmpeg decodificó el frame) sin que eso indique una regresión
+    # real: lo que importa es que los picos de verdad sigan siendo los mejor
+    # puntuados.
+    assert len(moments) >= 3, f"se esperaban al menos 3 momentos, se encontraron {len(moments)}"
+    top3 = sorted(moments, key=lambda m: -m.score)[:3]
 
     for expected_peak in KNOWN_PEAKS:
-        closest = min(moments, key=lambda m: abs(m.peak_time - expected_peak))
+        closest = min(top3, key=lambda m: abs(m.peak_time - expected_peak))
         diff = abs(closest.peak_time - expected_peak)
         assert diff <= TOLERANCE_S, (
             f"pico esperado en t={expected_peak}s, el más cercano detectado fue "

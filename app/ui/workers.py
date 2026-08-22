@@ -8,24 +8,35 @@ conecta a la barra de progreso y a los logs.
 """
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import QThread, Signal
 
-from ..core.moment_detector import run_full_analysis, AnalysisResult
+from ..core.moment_detector import run_full_analysis, AnalysisResult, FAST_MODE, AnalysisMode
+from ..core.proc_utils import AnalysisCancelled
 from ..core.clip_exporter import export_clip, ExportOptions
+from ..core.batch_export import BatchExportJob, BatchExportResult, run_batch_export
 
 
 class AnalysisWorker(QThread):
     progress = Signal(str, float)     # (etapa, 0..1)
     finished_ok = Signal(object)      # AnalysisResult
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, video_path: str, work_dir: str,
-                 clip_len_options: tuple, max_moments: int, parent=None):
+                 clip_len_options: tuple, max_moments: int,
+                 mode: AnalysisMode = FAST_MODE, parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self.work_dir = work_dir
         self.clip_len_options = clip_len_options
         self.max_moments = max_moments
+        self.mode = mode
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self._cancel_event.set()
 
     def run(self):
         try:
@@ -33,9 +44,13 @@ class AnalysisWorker(QThread):
                 self.video_path, self.work_dir,
                 clip_len_options=self.clip_len_options,
                 max_moments=self.max_moments,
+                mode=self.mode,
                 progress_cb=lambda stage, frac: self.progress.emit(stage, frac),
+                cancel_check=self._cancel_event.is_set,
             )
             self.finished_ok.emit(result)
+        except AnalysisCancelled:
+            self.cancelled.emit()
         except Exception as e:
             import traceback
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
@@ -74,3 +89,23 @@ class ExportWorker(QThread):
         except Exception as e:
             import traceback
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
+
+
+class BatchExportWorker(QThread):
+    """Exporta varios clips (uno por cada momento x formato seleccionado)
+    a una carpeta ya elegida por el usuario, uno tras otro, sin volver a
+    preguntar nada. Un fallo en un clip no detiene a los demás - ver
+    `batch_export.run_batch_export`."""
+    progress = Signal(int, int, str)          # (índice 1-based, total, etiqueta del job actual)
+    finished_all = Signal(list)               # list[BatchExportResult]
+
+    def __init__(self, jobs: list[BatchExportJob], parent=None):
+        super().__init__(parent)
+        self.jobs = jobs
+
+    def run(self):
+        results: list[BatchExportResult] = run_batch_export(
+            self.jobs,
+            progress_cb=lambda i, total, label: self.progress.emit(i, total, label),
+        )
+        self.finished_all.emit(results)

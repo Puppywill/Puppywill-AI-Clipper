@@ -2,8 +2,9 @@
 moment_detector.py
 -------------------
 Orquesta el pipeline completo del MVP:
-  video -> extraer audio -> analizar audio -> analizar video ->
-  detectar kills (best-effort) -> score combinado -> top momentos.
+  video -> extraer audio + analizar video (en paralelo) ->
+  analizar energía de audio -> detectar kills (best-effort) ->
+  score combinado -> top momentos.
 
 Puppywill AI Clipper solo encuentra y recorta los mejores momentos
 (intensidad de audio, gritos/picos, risas, movimiento, acción visual,
@@ -12,23 +13,52 @@ efectos, títulos, música) se hace fuera de la app (p.ej. en CapCut). No
 hay transcripción ni carga de modelos de lenguaje en este pipeline (el
 OCR opcional del kill feed lee texto en pantalla, no transcribe voz).
 
-Diseñado para reportar progreso (para la barra de progreso de la UI) y
-para poder saltarse pasos (p.ej. si el video no se puede leer con
-OpenCV, sigue funcionando solo con audio; si falla la detección de
-kills, sigue funcionando con las señales genéricas de antes).
+Diseñado para reportar progreso real (para la barra de progreso de la
+UI, incluyendo tiempo estimado restante calculado por la UI a partir de
+frac/tiempo transcurrido), para poder cancelarse a mitad de camino sin
+congelar la app (ver `cancel_check`/`AnalysisCancelled`), y para poder
+saltarse pasos (p.ej. si el video no se puede leer con OpenCV, sigue
+funcionando solo con audio; si falla la detección de kills, sigue
+funcionando con las señales genéricas de antes).
+
+Hay dos modos, elegidos por el usuario en la UI (Rápido es el
+predeterminado): Rápido muestrea menos frames/candidatos OCR, Preciso
+muestrea más. La decodificación acelerada por GPU se usa en ambos modos
+por igual cuando está disponible - no es un trade-off de calidad, solo
+de qué tan rápido decodifica FFmpeg.
 """
 from __future__ import annotations
 
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import audio_analysis, visual_analysis, scoring, kill_events
+from . import audio_analysis, visual_analysis, scoring, kill_events, analysis_cache
+from .proc_utils import AnalysisCancelled, CancelCheck, check_cancel
 from .video_io import VideoInfo, validate_and_probe
 from .scoring import Moment, ScoreWeights
 
 ProgressCB = Optional[Callable[[str, float], None]]  # (etapa, 0..1)
+
+
+@dataclass(frozen=True)
+class AnalysisMode:
+    name: str
+    sample_fps: float
+    resize_w: int
+    max_ocr_candidates: int
+
+
+# Rápido (predeterminado): menos muestras/segundo y menos candidatos OCR.
+# La decodificación GPU ya hace la parte cara (el decode en sí) igual de
+# rápida en los dos modos - lo que cambia es cuánto se analiza después.
+FAST_MODE = AnalysisMode(name="Rápido", sample_fps=1.5, resize_w=160,
+                          max_ocr_candidates=kill_events.MAX_OCR_CANDIDATES_FAST)
+PRECISE_MODE = AnalysisMode(name="Preciso", sample_fps=3.0, resize_w=224,
+                             max_ocr_candidates=kill_events.MAX_OCR_CANDIDATES)
+MODES = {FAST_MODE.name: FAST_MODE, PRECISE_MODE.name: PRECISE_MODE}
 
 
 @dataclass
@@ -43,6 +73,7 @@ class AnalysisResult:
     # posicionamiento dinámico si el usuario cambia la duración elegida
     action_grid: np.ndarray = field(default_factory=lambda: np.array([]))
     action_score: np.ndarray = field(default_factory=lambda: np.array([]))
+    from_cache: bool = False
 
 
 def run_full_analysis(
@@ -50,39 +81,93 @@ def run_full_analysis(
     work_dir: str,
     clip_len_options: tuple[int, ...] = (15, 30, 45, 60),
     max_moments: int = 15,
+    mode: AnalysisMode = FAST_MODE,
     progress_cb: ProgressCB = None,
+    cancel_check: CancelCheck = None,
+    use_cache: bool = True,
 ) -> AnalysisResult:
     def report(stage, frac):
         if progress_cb:
             progress_cb(stage, frac)
 
+    check_cancel(cancel_check)
     report("Validando video", 0.0)
     info = validate_and_probe(video_path)
+    check_cancel(cancel_check)
+
+    if use_cache:
+        cached = analysis_cache.load(video_path, mode, clip_len_options, max_moments)
+        if cached is not None:
+            report("Cargado desde caché (mismo video y ajustes ya analizados)", 1.0)
+            cached.from_cache = True
+            return cached
 
     work_dir_p = Path(work_dir)
     work_dir_p.mkdir(parents=True, exist_ok=True)
     wav_path = str(work_dir_p / "audio_16k_mono.wav")
 
-    report("Extrayendo audio", 0.10)
-    audio_analysis.extract_audio_wav(video_path, wav_path)
+    # audio y video se leen del mismo archivo pero son dos pasadas
+    # independientes de FFmpeg (una sin video -vn, otra sin audio) - no hay
+    # nada que las obligue a ser secuenciales, así que corren en paralelo.
+    # El audio siempre es mucho más rápido; el tiempo total de esta etapa
+    # lo domina el análisis visual, así que el progreso reportado sigue el
+    # de `analyze_visual`.
+    def _visual_progress(local_frac: float):
+        report("Analizando audio y video (GPU si está disponible)", 0.05 + 0.70 * local_frac)
 
-    report("Analizando energía de audio (gritos, risas, picos)", 0.35)
-    audio_feats = audio_analysis.analyze_audio(wav_path)
+    report("Extrayendo y analizando audio + video", 0.02)
+    audio_feats = None
+    visual_feats = None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        def _do_audio():
+            audio_analysis.extract_audio_wav(video_path, wav_path, cancel_check=cancel_check)
+            return audio_analysis.analyze_audio(wav_path)
 
-    report("Analizando actividad visual (movimiento, cortes de escena)", 0.65)
-    try:
-        visual_feats = visual_analysis.analyze_visual(video_path)
-    except Exception:
-        visual_feats = None  # no bloquea el pipeline si el video no se puede leer con OpenCV
+        f_audio = pool.submit(_do_audio)
+        f_visual = pool.submit(
+            visual_analysis.analyze_visual, video_path, mode.sample_fps, mode.resize_w,
+            True, info, _visual_progress, cancel_check,
+        )
 
-    report("Detectando kills", 0.80)
+        # OJO: si cualquiera de los dos lanza AnalysisCancelled, se relanza
+        # de inmediato; al salir del bloque `with` el pool espera (join) a
+        # que el otro hilo también termine de abortar su propio subproceso
+        # de FFmpeg vía el mismo `cancel_check` compartido - no se queda
+        # ningún proceso de FFmpeg colgado en segundo plano.
+        audio_error = None
+        try:
+            audio_feats = f_audio.result()
+        except AnalysisCancelled:
+            raise
+        except Exception as e:
+            audio_error = e
+
+        try:
+            visual_feats = f_visual.result()
+        except AnalysisCancelled:
+            raise
+        except Exception:
+            visual_feats = None  # no bloquea el pipeline si el video no se puede leer
+
+        if audio_feats is None:
+            raise audio_error  # el audio SÍ es obligatorio (es la señal primaria)
+
+    check_cancel(cancel_check)
+
+    report("Detectando kills", 0.75)
     kill_feats = None
     try:
-        kill_feats = kill_events.build_kill_feed_features(video_path, audio_feats, visual_feats)
+        kill_feats = kill_events.build_kill_feed_features(
+            video_path, audio_feats, visual_feats,
+            max_ocr_candidates=mode.max_ocr_candidates, cancel_check=cancel_check,
+        )
+    except AnalysisCancelled:
+        raise
     except Exception:
         kill_feats = None  # best-effort: si falla, el análisis sigue con las señales genéricas
+    check_cancel(cancel_check)
 
-    report("Calculando puntuación combinada", 0.90)
+    report("Calculando puntuación combinada", 0.92)
     kill_times = kill_feats.times if kill_feats is not None else None
     kill_activity = kill_feats.kill_activity if kill_feats is not None else None
     grid, score = scoring.build_unified_score(
@@ -102,7 +187,7 @@ def run_full_analysis(
 
     report("Análisis completo", 1.0)
 
-    return AnalysisResult(
+    result = AnalysisResult(
         video_info=info,
         moments=moments,
         audio_features=audio_feats,
@@ -111,3 +196,6 @@ def run_full_analysis(
         action_grid=grid,
         action_score=score,
     )
+    if use_cache:
+        analysis_cache.save(video_path, mode, clip_len_options, max_moments, result)
+    return result

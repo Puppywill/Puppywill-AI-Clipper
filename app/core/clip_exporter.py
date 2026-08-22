@@ -19,11 +19,11 @@ configurar nada.
 """
 from __future__ import annotations
 
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Literal
+
+from .proc_utils import ffmpeg_bin, run_hidden
 
 AspectRatio = Literal["9:16", "16:9", "1:1"]
 
@@ -32,13 +32,6 @@ TARGET_DIMENSIONS = {
     "16:9": (1920, 1080),
     "1:1": (1080, 1080),
 }
-
-
-def _ffmpeg_bin() -> str:
-    exe = shutil.which("ffmpeg")
-    if not exe:
-        raise RuntimeError("No se encontró FFmpeg en el PATH.")
-    return exe
 
 
 _NVENC_AVAILABLE: Optional[bool] = None
@@ -51,12 +44,12 @@ def nvenc_available() -> bool:
     global _NVENC_AVAILABLE
     if _NVENC_AVAILABLE is not None:
         return _NVENC_AVAILABLE
-    ffmpeg = _ffmpeg_bin()
+    ffmpeg = ffmpeg_bin()
     try:
-        proc = subprocess.run(
+        proc = run_hidden(
             [ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "color=black:s=1280x720:d=0.1",
              "-c:v", "h264_nvenc", "-f", "null", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+            timeout=15,
         )
         _NVENC_AVAILABLE = proc.returncode == 0
     except Exception:
@@ -122,7 +115,7 @@ def export_clip(
     Devuelve la ruta del archivo generado. Lanza RuntimeError con el
     stderr de FFmpeg si algo falla (no se traga errores en silencio).
     """
-    ffmpeg = _ffmpeg_bin()
+    ffmpeg = ffmpeg_bin()
     out_path = str(out_path)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +160,7 @@ def export_clip(
     cmd += ["-movflags", "+faststart"]
     cmd += [out_path]
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = run_hidden(cmd)
     if proc.returncode != 0:
         raise RuntimeError(
             f"FFmpeg falló exportando el clip:\ncmd={' '.join(cmd)}\n\n{proc.stderr.decode(errors='ignore')[-3000:]}"

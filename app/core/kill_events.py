@@ -40,15 +40,20 @@ from __future__ import annotations
 
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from .audio_analysis import AudioFeatures
+from .proc_utils import CancelCheck, check_cancel, ffmpeg_bin, run_hidden
 from .visual_analysis import VisualFeatures, KILL_FEED_ROI_FRAC
 
-MAX_OCR_CANDIDATES = 80  # tope duro: acota el costo de OCR en videos muy largos
+MAX_OCR_CANDIDATES = 80  # tope duro (modo Preciso): acota el costo de OCR en videos muy largos
+MAX_OCR_CANDIDATES_FAST = 40  # modo Rápido: la mitad de candidatos, misma lógica
+OCR_WORKERS = 4  # cada candidato es un subproceso independiente (ffmpeg + tesseract) - seguro en paralelo
 
 # Franja central del frame donde aparecen los banners de "Round X Complete",
 # "Defeat", "Victory" - ancha a propósito (todo el ancho, buena parte del
@@ -171,14 +176,50 @@ def _crop_frac(frame, roi_frac: tuple[float, float, float, float]):
     return frame[int(y0f * h):int(y1f * h), int(x0f * w):int(x1f * w)]
 
 
-def _ocr_text(pytesseract_mod, cv2_mod, crop) -> str:
-    if crop.size == 0:
+def _grab_frame_ffmpeg(video_path: str, t: float) -> Optional[np.ndarray]:
+    """Extrae UN solo frame en el instante `t` sin pasar por
+    cv2.VideoCapture: `-ss` ANTES de `-i` le pide a FFmpeg un seek rápido
+    por keyframe (mucho más barato que decodificar desde el inicio, sobre
+    todo en códecs pesados de decodificar como AV1). Cada llamada es un
+    subproceso corto e independiente, así que varias corren en paralelo
+    sin pisarse (ver OCR_WORKERS)."""
+    try:
+        ffmpeg = ffmpeg_bin()
+    except Exception:
+        return None
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostats",
+        "-ss", f"{max(0.0, t):.3f}", "-i", str(video_path),
+        "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-",
+    ]
+    try:
+        proc = run_hidden(cmd, timeout=15)
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    arr = np.frombuffer(proc.stdout, dtype=np.uint8)
+    if arr.size == 0:
+        return None
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
+def _tesseract_ocr(tess_bin: str, crop: np.ndarray) -> str:
+    """Corre tesseract.exe directamente sobre la imagen (stdin -> stdout,
+    sin archivos temporales ni la dependencia de pytesseract, que lanza
+    su propio subproceso sin ocultar la ventana de consola)."""
+    if crop is None or crop.size == 0:
+        return ""
+    ok, buf = cv2.imencode(".png", crop)
+    if not ok:
         return ""
     try:
-        gray = cv2_mod.cvtColor(crop, cv2_mod.COLOR_BGR2GRAY)
-        return pytesseract_mod.image_to_string(gray)
+        proc = run_hidden([tess_bin, "stdin", "stdout"], input=buf.tobytes(), timeout=10)
     except Exception:
         return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.decode(errors="ignore")
 
 
 def _is_transition_text(text: str) -> bool:
@@ -186,52 +227,55 @@ def _is_transition_text(text: str) -> bool:
     return any(kw in lowered for kw in TRANSITION_KEYWORDS)
 
 
+def _ocr_candidate(video_path: str, t: float, tess_bin: str,
+                    roi_frac: tuple[float, float, float, float]) -> Optional[KillEvent]:
+    frame = _grab_frame_ffmpeg(video_path, t)
+    if frame is None:
+        return None
+    if _is_transition_text(_tesseract_ocr(tess_bin, _crop_frac(frame, TRANSITION_TEXT_ROI_FRAC))):
+        return None  # pantalla de "Round Complete"/"Defeat"/"Victory", no un kill
+    text = _tesseract_ocr(tess_bin, _crop_frac(frame, roi_frac))
+    lines = [ln for ln in text.splitlines() if len(ln.strip()) >= 3]
+    if not lines:
+        return None
+    return KillEvent(time=t, confidence=min(1.0, 0.5 + 0.15 * len(lines)), source="ocr")
+
+
 def refine_with_ocr(video_path: str, candidate_times: list[float],
-                     roi_frac: tuple[float, float, float, float] = KILL_FEED_ROI_FRAC) -> list[KillEvent]:
-    """OCR barato: abre el video UNA vez y busca solo los instantes ya
-    señalados por la señal visual (no decodifica todo el video de nuevo).
-    Cuenta líneas de texto detectadas en la región del kill feed como
-    proxy de cuántas eliminaciones aparecen listadas a la vez
-    (multikill) - descartando instantes que resulten ser una pantalla de
-    transición (ver TRANSITION_KEYWORDS)."""
+                     roi_frac: tuple[float, float, float, float] = KILL_FEED_ROI_FRAC,
+                     max_candidates: int = MAX_OCR_CANDIDATES,
+                     cancel_check: CancelCheck = None) -> list[KillEvent]:
+    """OCR barato: solo busca en los instantes ya señalados por la señal
+    visual (nunca todo el video). Cuenta líneas de texto detectadas en la
+    región del kill feed como proxy de cuántas eliminaciones aparecen
+    listadas a la vez (multikill) - descartando instantes que resulten
+    ser una pantalla de transición (ver TRANSITION_KEYWORDS). Cada
+    candidato es un frame + OCR independientes, así que corren en un
+    pool de hilos pequeño (todo el costo es de subproceso, no de CPU
+    Python, así que el GIL no es un problema)."""
     if not candidate_times:
         return []
     tess_bin = tesseract_binary()
     if not tess_bin:
         return []
 
-    try:
-        import cv2
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = tess_bin
-    except Exception:
-        return []
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return []
-
+    times = candidate_times[:max_candidates]
     events: list[KillEvent] = []
-    try:
-        for t in candidate_times[:MAX_OCR_CANDIDATES]:
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t * 1000.0))
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            if _is_transition_text(_ocr_text(pytesseract, cv2, _crop_frac(frame, TRANSITION_TEXT_ROI_FRAC))):
-                continue  # pantalla de "Round Complete"/"Defeat"/"Victory", no un kill
-            text = _ocr_text(pytesseract, cv2, _crop_frac(frame, roi_frac))
-            lines = [ln for ln in text.splitlines() if len(ln.strip()) >= 3]
-            if lines:
-                events.append(KillEvent(time=t, confidence=min(1.0, 0.5 + 0.15 * len(lines)), source="ocr"))
-    finally:
-        cap.release()
+    with ThreadPoolExecutor(max_workers=OCR_WORKERS) as pool:
+        futures = [pool.submit(_ocr_candidate, video_path, t, tess_bin, roi_frac) for t in times]
+        for i, fut in enumerate(futures):
+            if i % 4 == 0:
+                check_cancel(cancel_check)
+            ev = fut.result()
+            if ev is not None:
+                events.append(ev)
 
     return events
 
 
 def filter_transition_screens(video_path: str, events: list[KillEvent],
-                               max_checks: int = MAX_OCR_CANDIDATES) -> list[KillEvent]:
+                               max_checks: int = MAX_OCR_CANDIDATES,
+                               cancel_check: CancelCheck = None) -> list[KillEvent]:
     """Descarta eventos de kill cuyo instante en realidad corresponde a
     una pantalla de transición (fin de ronda, derrota, victoria) en vez
     de una eliminación real - el chime de esas pantallas tiene la misma
@@ -244,34 +288,28 @@ def filter_transition_screens(video_path: str, events: list[KillEvent],
     if not tess_bin:
         return events
 
-    try:
-        import cv2
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = tess_bin
-    except Exception:
-        return events
-
     # si hay demasiados eventos para un video muy largo, prioriza revisar
     # los de mayor confianza primero (los que más probablemente terminen
     # como "Kill"/"Multikill" visibles al usuario)
     to_check = sorted(events, key=lambda e: -e.confidence)[:max_checks]
-    check_times = {e.time for e in to_check}
+    check_times = sorted({e.time for e in to_check})
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return events
+    def _check_one(t: float) -> Optional[float]:
+        frame = _grab_frame_ffmpeg(video_path, t)
+        if frame is None:
+            return None
+        text = _tesseract_ocr(tess_bin, _crop_frac(frame, TRANSITION_TEXT_ROI_FRAC))
+        return t if _is_transition_text(text) else None
 
     rejected: set[float] = set()
-    try:
-        for t in check_times:
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t * 1000.0))
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            if _is_transition_text(_ocr_text(pytesseract, cv2, _crop_frac(frame, TRANSITION_TEXT_ROI_FRAC))):
+    with ThreadPoolExecutor(max_workers=OCR_WORKERS) as pool:
+        futures = [pool.submit(_check_one, t) for t in check_times]
+        for i, fut in enumerate(futures):
+            if i % 4 == 0:
+                check_cancel(cancel_check)
+            t = fut.result()
+            if t is not None:
                 rejected.add(t)
-    finally:
-        cap.release()
 
     if not rejected:
         return events
@@ -283,14 +321,18 @@ def build_kill_feed_features(
     audio: AudioFeatures,
     visual: Optional[VisualFeatures] = None,
     use_ocr: bool = True,
+    max_ocr_candidates: int = MAX_OCR_CANDIDATES,
+    cancel_check: CancelCheck = None,
 ) -> KillFeedFeatures:
     """Combina audio (siempre disponible) + señal visual del ROI (si
     `visual_analysis.py` la calculó) + OCR opcional, en una única curva
     `kill_activity` 0..1 sobre la rejilla temporal del audio."""
     audio_cue, events = _detect_audio_kill_cues(audio)
+    check_cancel(cancel_check)
 
     if use_ocr and events:
-        filtered = filter_transition_screens(video_path, events)
+        filtered = filter_transition_screens(video_path, events, max_checks=max_ocr_candidates,
+                                              cancel_check=cancel_check)
         rejected_times = {e.time for e in events} - {e.time for e in filtered}
         if rejected_times:
             # tambien baja la curva continua en esos instantes: sin esto, el
@@ -311,8 +353,9 @@ def build_kill_feed_features(
             activity = np.clip(activity + 0.4 * visual_on_grid, 0.0, 1.0)
 
             if use_ocr:
-                candidates = _select_ocr_candidates(visual, MAX_OCR_CANDIDATES)
-                ocr_events = refine_with_ocr(video_path, candidates)
+                candidates = _select_ocr_candidates(visual, max_ocr_candidates)
+                ocr_events = refine_with_ocr(video_path, candidates, max_candidates=max_ocr_candidates,
+                                              cancel_check=cancel_check)
                 if ocr_events:
                     events.extend(ocr_events)
                     ocr_used = True

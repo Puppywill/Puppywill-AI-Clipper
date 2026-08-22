@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, QTimer
@@ -46,7 +47,9 @@ from ..core.video_io import validate_and_probe, VideoValidationError, SUPPORTED_
 from ..core import project as project_mod
 from ..core import scoring
 from ..core.clip_exporter import ExportOptions
-from .workers import AnalysisWorker, ExportWorker
+from ..core.moment_detector import FAST_MODE, PRECISE_MODE, MODES
+from ..core.batch_export import BatchExportJob, unique_path
+from .workers import AnalysisWorker, ExportWorker, BatchExportWorker
 from .styles import DARK_QSS, ACCENT_2
 
 
@@ -60,16 +63,23 @@ def format_time(seconds: float) -> str:
 
 
 class MomentListItemWidget(QWidget):
-    """Widget custom para cada fila de la lista de momentos: rango de
-    tiempo, badge de score y razones detectadas (audio/movimiento/escena)."""
+    """Widget custom para cada fila de la lista de momentos: casilla de
+    selección (para exportar varios a la vez), rango de tiempo, badge de
+    score y razones detectadas (audio/movimiento/escena)."""
 
-    def __init__(self, moment, index: int):
+    def __init__(self, moment, index: int, on_toggle=None):
         super().__init__()
         self.moment = moment
+        self.index = index
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
 
         top_row = QHBoxLayout()
+        self.checkbox = QCheckBox()
+        self.checkbox.setToolTip("Seleccionar para exportar junto a otros momentos marcados")
+        if on_toggle is not None:
+            self.checkbox.toggled.connect(lambda checked: on_toggle(index, checked))
+        top_row.addWidget(self.checkbox)
         time_label = QLabel(f"#{index+1}  {format_time(moment.start)} – {format_time(moment.end)}")
         time_label.setStyleSheet("font-weight: 600;")
         score_label = QLabel(f"{moment.score:.0f}")
@@ -103,6 +113,9 @@ class MainWindow(QMainWindow):
         self._moment_peak_time = 0.0
         self._action_grid = None
         self._action_score = None
+        self._analysis_start_time = 0.0
+        self.selected_moment_indices: set[int] = set()
+        self._moment_widgets: list[MomentListItemWidget] = []
 
         self._build_ui()
         self.setStyleSheet(DARK_QSS)
@@ -158,6 +171,15 @@ class MainWindow(QMainWindow):
         self.spin_max_moments.setRange(3, 40)
         self.spin_max_moments.setValue(self.settings.max_moments_per_video)
         form.addRow("Máx. momentos:", self.spin_max_moments)
+
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems([FAST_MODE.name, PRECISE_MODE.name])
+        self.combo_mode.setCurrentText(FAST_MODE.name)
+        self.combo_mode.setToolTip(
+            "Rápido: decodificación GPU + menos muestras/candidatos OCR - recomendado.\n"
+            "Preciso: más muestras por segundo y más candidatos OCR, más lento."
+        )
+        form.addRow("Modo:", self.combo_mode)
         lay.addLayout(form)
 
         self.btn_analyze = QPushButton("⚡  Analizar Stream")
@@ -165,6 +187,11 @@ class MainWindow(QMainWindow):
         self.btn_analyze.setEnabled(False)
         self.btn_analyze.clicked.connect(self.on_analyze_clicked)
         lay.addWidget(self.btn_analyze)
+
+        self.btn_cancel_analysis = QPushButton("✕  Cancelar análisis")
+        self.btn_cancel_analysis.setVisible(False)
+        self.btn_cancel_analysis.clicked.connect(self.on_cancel_analysis_clicked)
+        lay.addWidget(self.btn_cancel_analysis)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
@@ -177,7 +204,7 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        gpu_note = QLabel("GPU: se detecta automáticamente\n(CUDA/NVENC si está disponible)")
+        gpu_note = QLabel("GPU: se detecta automáticamente\n(NVDEC decode + NVENC export si están disponibles)")
         gpu_note.setStyleSheet("color: #6E6E80; font-size: 10px; padding: 8px;")
         gpu_note.setWordWrap(True)
         lay.addWidget(gpu_note)
@@ -210,6 +237,25 @@ class MainWindow(QMainWindow):
         self.moment_list = QListWidget()
         self.moment_list.itemClicked.connect(self.on_moment_selected)
         lay.addWidget(self.moment_list, 1)
+
+        selection_row = QHBoxLayout()
+        self.btn_select_all = QPushButton("☑ Seleccionar todos")
+        self.btn_select_all.clicked.connect(self.on_select_all_clicked)
+        self.btn_deselect_all = QPushButton("☐ Deseleccionar todos")
+        self.btn_deselect_all.clicked.connect(self.on_deselect_all_clicked)
+        selection_row.addWidget(self.btn_select_all)
+        selection_row.addWidget(self.btn_deselect_all)
+        lay.addLayout(selection_row)
+
+        self.btn_export_selected = QPushButton("⬇  Exportar seleccionados")
+        self.btn_export_selected.setObjectName("PrimaryButton")
+        self.btn_export_selected.setEnabled(False)
+        self.btn_export_selected.clicked.connect(self.on_export_selected_clicked)
+        lay.addWidget(self.btn_export_selected)
+
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setVisible(False)
+        lay.addWidget(self.batch_progress)
 
         return panel
 
@@ -341,45 +387,97 @@ class MainWindow(QMainWindow):
         if not self.video_path:
             return
         self.btn_analyze.setEnabled(False)
+        self.btn_cancel_analysis.setVisible(True)
         self.progress_bar.setValue(0)
+        self._analysis_start_time = time.monotonic()
 
+        mode = MODES.get(self.combo_mode.currentText(), FAST_MODE)
         self.worker = AnalysisWorker(
             video_path=self.video_path,
             work_dir=self.work_dir,
             clip_len_options=(15, 30, 45, 60),
             max_moments=self.spin_max_moments.value(),
+            mode=mode,
         )
         self.worker.progress.connect(self.on_analysis_progress)
         self.worker.finished_ok.connect(self.on_analysis_finished)
         self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.cancelled.connect(self.on_analysis_cancelled)
         self.worker.start()
+
+    def on_cancel_analysis_clicked(self):
+        if hasattr(self, "worker") and self.worker.isRunning():
+            self.btn_cancel_analysis.setEnabled(False)
+            self.log_label.setText("Cancelando… (esperando a que FFmpeg termine el frame actual)")
+            self.worker.request_cancel()
 
     def on_analysis_progress(self, stage: str, frac: float):
         self.progress_bar.setValue(int(frac * 100))
-        self.log_label.setText(stage)
+        eta_text = ""
+        elapsed = time.monotonic() - self._analysis_start_time
+        if 0.03 < frac < 0.995 and elapsed > 1.0:
+            remaining = elapsed * (1.0 - frac) / frac
+            eta_text = f"  —  ~{format_time(max(0.0, remaining))} restantes"
+        self.log_label.setText(f"{stage}{eta_text}")
+
+    def _analysis_ui_reset(self):
+        self.btn_analyze.setEnabled(True)
+        self.btn_cancel_analysis.setVisible(False)
+        self.btn_cancel_analysis.setEnabled(True)
 
     def on_analysis_finished(self, result):
+        self._analysis_ui_reset()
         self.analysis_result = result
         # curva de intensidad completa, para poder recolocar la ventana
         # dinámicamente si el usuario cambia la duración elegida
         self._action_grid = result.action_grid
         self._action_score = result.action_score
+        self.selected_moment_indices = set()
+        self._moment_widgets = []
         self.moment_list.clear()
         for i, m in enumerate(result.moments):
             item = QListWidgetItem()
-            widget = MomentListItemWidget(m, i)
+            widget = MomentListItemWidget(m, i, on_toggle=self._on_moment_checkbox_toggled)
             item.setSizeHint(widget.sizeHint())
             self.moment_list.addItem(item)
             self.moment_list.setItemWidget(item, widget)
-        self.btn_analyze.setEnabled(True)
-        self.log_label.setText(f"{len(result.moments)} momentos encontrados.")
+            self._moment_widgets.append(widget)
+        self._update_export_selected_button()
+        cache_note = " (cargado desde caché)" if getattr(result, "from_cache", False) else ""
+        self.log_label.setText(f"{len(result.moments)} momentos encontrados{cache_note}.")
         if not result.moments:
             QMessageBox.information(self, APP_NAME, "No se encontraron momentos destacados claros. Prueba bajando el umbral o revisando el audio del video.")
 
     def on_analysis_failed(self, error: str):
-        self.btn_analyze.setEnabled(True)
+        self._analysis_ui_reset()
         self.log_label.setText("Error en el análisis.")
         QMessageBox.critical(self, APP_NAME, f"El análisis falló:\n\n{error}")
+
+    def on_analysis_cancelled(self):
+        self._analysis_ui_reset()
+        self.progress_bar.setValue(0)
+        self.log_label.setText("Análisis cancelado.")
+
+    # -------------------------------------------------- Selección múltiple
+    def _on_moment_checkbox_toggled(self, index: int, checked: bool):
+        if checked:
+            self.selected_moment_indices.add(index)
+        else:
+            self.selected_moment_indices.discard(index)
+        self._update_export_selected_button()
+
+    def _update_export_selected_button(self):
+        n = len(self.selected_moment_indices)
+        self.btn_export_selected.setText(f"⬇  Exportar seleccionados ({n})" if n else "⬇  Exportar seleccionados")
+        self.btn_export_selected.setEnabled(n > 0)
+
+    def on_select_all_clicked(self):
+        for w in self._moment_widgets:
+            w.checkbox.setChecked(True)
+
+    def on_deselect_all_clicked(self):
+        for w in self._moment_widgets:
+            w.checkbox.setChecked(False)
 
     def on_moment_selected(self, item: QListWidgetItem):
         if not self.analysis_result:
@@ -567,6 +665,127 @@ class MainWindow(QMainWindow):
     def _on_export_failed(self, error: str):
         self.btn_export.setEnabled(True)
         QMessageBox.critical(self, APP_NAME, f"La exportación falló:\n\n{error}")
+
+    # --------------------------------------------------- Exportación por lotes
+    def on_export_selected_clicked(self):
+        if not self.selected_moment_indices:
+            QMessageBox.warning(self, APP_NAME, "Marca la casilla de al menos un momento antes de exportar.")
+            return
+        if not self.video_path or not self.video_info or not self.analysis_result:
+            return
+
+        aspects = []
+        if self.chk_vertical.isChecked():
+            aspects.append("9:16")
+        if self.chk_horizontal.isChecked():
+            aspects.append("16:9")
+        if self.chk_square.isChecked():
+            aspects.append("1:1")
+        if not aspects:
+            QMessageBox.warning(self, APP_NAME, "Selecciona al menos un formato de exportación.")
+            return
+
+        dest_dir = QFileDialog.getExistingDirectory(
+            self, "Carpeta de destino para los clips seleccionados", self.settings.last_export_dir
+        )
+        if not dest_dir:
+            return  # el usuario canceló: no se exporta nada, el estado/selección queda intacto
+        self.settings.last_export_dir = dest_dir
+        self.settings.save()
+
+        jobs = self._build_batch_jobs(sorted(self.selected_moment_indices), aspects, Path(dest_dir))
+        if not jobs:
+            return
+
+        self._batch_dest_dir = dest_dir
+        self._batch_failed_last = []
+        self.btn_export.setEnabled(False)
+        self.btn_export_selected.setEnabled(False)
+        self.btn_select_all.setEnabled(False)
+        self.btn_deselect_all.setEnabled(False)
+        self.batch_progress.setVisible(True)
+        self.batch_progress.setValue(0)
+
+        self.batch_worker = BatchExportWorker(jobs)
+        self.batch_worker.progress.connect(self.on_batch_progress)
+        self.batch_worker.finished_all.connect(self.on_batch_finished)
+        self.batch_worker.start()
+
+    def _build_batch_jobs(self, indices: list[int], aspects: list[str], dest_dir: Path) -> list[BatchExportJob]:
+        """Un job por cada combinación momento x formato. El inicio/fin de
+        cada momento se calcula igual que al hacer clic en él individualmente
+        (mismo `scoring.compute_clip_window`, misma duración elegida en el
+        combo), así no hace falta clickear cada uno para exportarlo bien
+        encuadrado."""
+        length_sec = int(self.combo_length.currentText())
+        video_duration = max(1, int(self.video_info.duration_sec))
+        length_sec = max(1, min(length_sec, video_duration))
+        base_name = Path(self.video_path).stem
+
+        jobs: list[BatchExportJob] = []
+        for idx in indices:
+            moment = self.analysis_result.moments[idx]
+            start_f, _ = scoring.compute_clip_window(
+                moment.peak_time, length_sec, video_duration, self._action_grid, self._action_score
+            )
+            start = int(round(start_f))
+            start = max(0, min(start, video_duration - length_sec))
+            end = start + length_sec
+            mmss_tag = format_time(start).replace(":", "m") + "s"
+
+            for ratio in aspects:
+                safe_ratio = ratio.replace(":", "x")
+                filename = f"{base_name}_top{idx + 1:02d}_{mmss_tag}_{safe_ratio}.mp4"
+                out_path = unique_path(dest_dir, filename)
+                options = ExportOptions(
+                    aspect_ratio=ratio, fps=60, normalize_audio=self.chk_normalize.isChecked(),
+                )
+                jobs.append(BatchExportJob(
+                    source_video=self.video_path, out_path=str(out_path),
+                    start=float(start), end=float(end), options=options,
+                    src_width=self.video_info.width, src_height=self.video_info.height,
+                    label=f"Momento #{idx + 1} ({ratio})",
+                ))
+        return jobs
+
+    def on_batch_progress(self, i: int, total: int, label: str):
+        self.batch_progress.setValue(int((i - 1) / total * 100))
+        self.log_label.setText(f"Exportando {i} de {total}: {label}")
+
+    def _batch_ui_reset(self):
+        self.btn_export.setEnabled(True)
+        self.btn_export_selected.setEnabled(len(self.selected_moment_indices) > 0)
+        self.btn_select_all.setEnabled(True)
+        self.btn_deselect_all.setEnabled(True)
+        self.batch_progress.setVisible(False)
+
+    def on_batch_finished(self, results: list):
+        self._batch_ui_reset()
+        total = len(results)
+        ok_results = [r for r in results if r.ok]
+        failed_results = [r for r in results if not r.ok]
+        dest_dir = getattr(self, "_batch_dest_dir", "")
+
+        self.log_label.setText(
+            f"Exportación por lotes: {len(ok_results)}/{total} completados"
+            + (f", {len(failed_results)} fallaron." if failed_results else ".")
+        )
+
+        if failed_results:
+            failed_lines = "\n".join(f"• {r.job.label}: {r.error[:200]}" for r in failed_results)
+            QMessageBox.warning(
+                self, APP_NAME,
+                f"Se exportaron {len(ok_results)} de {total} clips en:\n{dest_dir}\n\n"
+                f"Fallaron {len(failed_results)}:\n{failed_lines}"
+            )
+        else:
+            QMessageBox.information(
+                self, APP_NAME,
+                f"Se exportaron {len(ok_results)} clip(s) en:\n{dest_dir}"
+            )
+        # el video, los resultados del análisis y la selección de casillas
+        # quedan intactos: se puede seguir reproduciendo, ajustando y
+        # exportando más sin volver a analizar
 
     # ------------------------------------------------------------- Proyecto
     def on_save_project(self):

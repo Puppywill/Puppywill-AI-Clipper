@@ -12,6 +12,8 @@ Revisa:
   - FFmpeg / FFprobe en el PATH
   - GPU NVIDIA (vía nvidia-smi, opcional)
   - Soporte NVENC de FFmpeg (para exportación acelerada por GPU, opcional)
+  - Soporte NVDEC de FFmpeg (decode acelerado por GPU del video de entrada
+    durante el análisis - incluye AV1; opcional, sin él el análisis usa CPU)
   - Tesseract OCR (opcional, mejora el conteo de multikills)
   - Paquetes de requirements.txt instalados o no
 
@@ -62,6 +64,34 @@ def main():
             pass
     check("NVENC funcional (exportación acelerada por GPU)", nvenc_ok,
           "sin esto, la exportación usará CPU (libx264); normal si no hay GPU NVIDIA aquí")
+
+    # NVDEC (decode acelerado del video de entrada durante el análisis):
+    # hwaccel no se puede probar con una fuente lavfi sintética (no hay
+    # bitstream real que decodificar), así que codificamos un archivo H.264
+    # minúsculo primero y probamos a decodificarlo por GPU.
+    nvdec_ok = False
+    if ffmpeg_path:
+        try:
+            import tempfile
+            import os
+            with tempfile.TemporaryDirectory() as td:
+                tiny = os.path.join(td, "tiny.mp4")
+                enc = subprocess.run(
+                    [ffmpeg_path, "-hide_banner", "-f", "lavfi", "-i", "color=black:s=640x360:d=0.3",
+                     "-c:v", "libx264", "-preset", "ultrafast", tiny],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+                )
+                if enc.returncode == 0:
+                    proc = subprocess.run(
+                        [ffmpeg_path, "-hide_banner", "-hwaccel", "cuda", "-i", tiny,
+                         "-frames:v", "1", "-f", "null", "-"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+                    )
+                    nvdec_ok = proc.returncode == 0
+        except Exception:
+            pass
+    check("NVDEC funcional (decode acelerado del análisis, incluye AV1)", nvdec_ok,
+          "sin esto, el análisis decodifica por CPU; más lento pero funciona igual")
 
     # nvidia-smi (opcional: solo informativo, no bloquea nada)
     nvidia_smi = shutil.which("nvidia-smi")

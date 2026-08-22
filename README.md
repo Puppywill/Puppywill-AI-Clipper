@@ -50,11 +50,33 @@ necesita GPU. **Analiza grabaciones que ya tienes; no graba tu pantalla.**
   1:1 (feed), en H.264/1080p/60fps, sin subtítulos ni marca de agua — el
   clip queda limpio para que edites en CapCut.
 - **Normalización de audio** (loudnorm EBU R128) opcional.
-- **"Guardar como"** en cada exportación: recuerda la última carpeta usada,
-  pero puedes cambiar carpeta y nombre libremente cada vez.
-- **Aceleración por GPU (NVENC)** automática si hay una GPU NVIDIA
-  disponible; si no, exporta con CPU (libx264) sin que tengas que configurar
-  nada.
+- **"Guardar como"** en cada exportación individual: recuerda la última
+  carpeta usada, pero puedes cambiar carpeta y nombre libremente cada vez.
+- **Exportación por lotes**: marca la casilla de varios momentos (o usa
+  "Seleccionar todos"), elige carpeta de destino UNA sola vez, y se exportan
+  todos en los formatos marcados con nombres únicos y descriptivos
+  (`video_top01_00m12s_9x16.mp4`, ...) que nunca sobrescriben un clip
+  existente. Muestra "Exportando N de M"; si un clip falla, los demás
+  siguen y al final se indica cuál falló. La app sigue abierta y con el
+  video/resultados/selección intactos, lista para seguir exportando.
+- **Aceleración por GPU tanto al analizar como al exportar**: el decode del
+  video de entrada usa NVDEC (`ffmpeg -hwaccel cuda`) cuando está
+  disponible — incluye AV1, no solo H.264/HEVC — y la exportación usa NVENC;
+  si no hay GPU NVIDIA, todo cae a CPU automáticamente, sin configurar nada.
+- **Modo Rápido (predeterminado) / Preciso**: Rápido decodifica menos
+  muestras por segundo y revisa menos candidatos de OCR — pensado para
+  streams de horas; Preciso muestrea más denso para mayor detalle. La
+  aceleración por GPU se usa igual en ambos modos.
+- **Análisis en paralelo**: el audio y el video se leen y analizan en dos
+  hilos simultáneos (son dos pasadas independientes del mismo archivo), y el
+  OCR de candidatos a kill corre en un pequeño pool de hilos en vez de uno
+  por uno.
+- **Progreso real con tiempo estimado restante** y **botón para cancelar**
+  el análisis en cualquier momento sin congelar ni cerrar la app (mata el
+  proceso de FFmpeg en curso al instante).
+- **Caché de resultados**: si vuelves a analizar el mismo archivo con los
+  mismos ajustes (mismo modo, misma duración/cantidad de momentos), el
+  resultado se carga al instante en vez de repetir el análisis completo.
 - **Guardar/cargar proyecto** (`.pwproj`) para retomar el trabajo después.
 
 ## 📋 Requisitos
@@ -154,10 +176,13 @@ a tu escritorio, y cambia su icono (Propiedades → Cambiar icono) al de
    sliders si quieres afinar el corte manualmente.
 5. Elige la duración (15/30/45/60s) y los formatos de salida (9:16 / 16:9 /
    1:1), y si quieres normalizar el audio.
-6. Pulsa **Exportar Clip**. Por cada formato se abre "Guardar como" (con la
-   última carpeta usada por defecto, pero puedes cambiarla). El resultado es
-   un MP4 limpio, listo para importar en CapCut y editar ahí título,
-   subtítulos, efectos y música.
+6. Pulsa **Exportar Clip** para exportar solo el momento seleccionado (por
+   cada formato se abre "Guardar como", con la última carpeta usada por
+   defecto pero puedes cambiarla). O marca la casilla de varios momentos y
+   pulsa **Exportar seleccionados** para exportarlos todos juntos a una
+   carpeta que eliges una sola vez. El resultado es siempre un MP4 limpio,
+   listo para importar en CapCut y editar ahí título, subtítulos, efectos y
+   música.
 7. Guarda el proyecto para retomar el trabajo más tarde sin perder los
    momentos detectados.
 
@@ -166,6 +191,7 @@ a tu escritorio, y cambia su icono (Propiedades → Cambiar icono) al de
 ```powershell
 python tests/test_pipeline.py
 python tests/test_kill_detection.py
+python tests/test_batch_export.py
 ```
 
 Ninguna depende de PySide6, GPU, ni de tener Tesseract instalado.
@@ -180,6 +206,10 @@ Ninguna depende de PySide6, GPU, ni de tener Tesseract instalado.
   solo clip etiquetado "Multikill", el kill aislado queda en su propio
   clip etiquetado "Kill", y el de mayor puntuación queda marcado "Best
   Play".
+- `test_batch_export.py`: verifica que los nombres de archivo nunca se
+  sobrescriben, que exportar varios momentos x formatos a la vez produce
+  todos los clips correctos con el progreso reportado bien, y que un clip
+  que falla (video inexistente) no detiene a los demás.
 
 ## 🗂️ Estructura del proyecto
 
@@ -195,7 +225,8 @@ puppywill_ai_clipper/
 │   └── puppywill_icon.png
 ├── tests/
 │   ├── test_pipeline.py         # prueba end-to-end real (audio+video+export)
-│   └── test_kill_detection.py   # prueba de kill/multikill/best play
+│   ├── test_kill_detection.py   # prueba de kill/multikill/best play
+│   └── test_batch_export.py     # prueba de exportación por lotes
 └── app/
     ├── config.py                 # ajustes persistentes del usuario
     ├── core/
@@ -204,8 +235,11 @@ puppywill_ai_clipper/
     │   ├── visual_analysis.py    # movimiento, cortes de escena, ROI de kill feed (opencv)
     │   ├── kill_events.py        # detección de kills: audio + visual + OCR opcional
     │   ├── scoring.py            # detección de momentos + estructura de highlight
-    │   ├── moment_detector.py    # orquesta el pipeline de análisis
+    │   ├── moment_detector.py    # orquesta el pipeline de análisis (modos, paralelismo, cancelación)
+    │   ├── analysis_cache.py     # caché en disco de resultados de análisis
+    │   ├── proc_utils.py         # subprocesos FFmpeg sin ventana + probe de decode GPU
     │   ├── clip_exporter.py      # exporta con FFmpeg (crop/normalize/GPU)
+    │   ├── batch_export.py       # exporta varios momentos x formatos en una pasada
     │   └── project.py            # guardar/cargar proyectos .pwproj
     └── ui/
         ├── styles.py              # tema oscuro QSS
