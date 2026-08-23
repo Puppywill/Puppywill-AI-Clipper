@@ -20,8 +20,10 @@ import pickle
 from pathlib import Path
 from typing import Optional
 
+from ..config import get_app_data_dir
+
 CACHE_VERSION = 1
-CACHE_DIR = Path.home() / ".puppywill_ai_clipper" / "analysis_cache"
+CACHE_DIR = get_app_data_dir() / "analysis_cache"
 
 
 def _cache_key(video_path: str, size_bytes: int, mtime: float, mode_name: str,

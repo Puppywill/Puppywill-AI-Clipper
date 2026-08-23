@@ -2,8 +2,13 @@
 config.py
 ---------
 Guarda y carga los ajustes persistentes del usuario en un JSON dentro de
-su carpeta de datos de aplicación (%APPDATA%\\PuppywillAIClipper en
-Windows, ~/.config/PuppywillAIClipper en Linux/Mac para desarrollo/pruebas).
+su carpeta de datos de aplicación local (%LOCALAPPDATA%\\PuppywillAIClipper
+en Windows, ~/.config/PuppywillAIClipper en Linux/Mac para desarrollo/
+pruebas) - LOCAL y no Roaming a propósito: son ajustes/caché de esta
+máquina (rutas de export, caché de análisis), no algo que deba
+sincronizarse entre equipos de un dominio. Nunca dentro de Program
+Files: el instalador no necesita permisos de administrador para que la
+app pueda escribir aquí.
 """
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ from pathlib import Path
 
 def get_app_data_dir() -> Path:
     if sys.platform == "win32":
-        base = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
     elif sys.platform == "darwin":
         base = str(Path.home() / "Library" / "Application Support")
     else:

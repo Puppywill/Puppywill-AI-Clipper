@@ -18,12 +18,25 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Callable, Optional
 
 CancelCheck = Optional[Callable[[], bool]]
 ProgressCB1 = Optional[Callable[[float], None]]  # progreso 0..1 dentro de una sola etapa
 
 _CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _bundled_bin_dir() -> Optional[Path]:
+    """Si esto corre como ejecutable empaquetado (PyInstaller), FFmpeg y
+    FFprobe viajan en una carpeta `ffmpeg\\` junto al .exe (ver
+    packaging/build_installer.py) - así el instalador funciona sin que el
+    usuario tenga que instalar FFmpeg aparte ni tocar el PATH del sistema.
+    En modo desarrollo (`python main.py`) esto devuelve None y se sigue
+    buscando en el PATH como siempre."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / "ffmpeg"
+    return None
 
 
 class AnalysisCancelled(Exception):
@@ -41,6 +54,11 @@ def popen_hidden(cmd, **kwargs) -> subprocess.Popen:
 
 
 def ffmpeg_bin() -> str:
+    bundled = _bundled_bin_dir()
+    if bundled is not None:
+        candidate = bundled / "ffmpeg.exe"
+        if candidate.is_file():
+            return str(candidate)
     exe = shutil.which("ffmpeg")
     if not exe:
         raise RuntimeError(
@@ -51,6 +69,11 @@ def ffmpeg_bin() -> str:
 
 
 def ffprobe_bin() -> str:
+    bundled = _bundled_bin_dir()
+    if bundled is not None:
+        candidate = bundled / "ffprobe.exe"
+        if candidate.is_file():
+            return str(candidate)
     exe = shutil.which("ffprobe")
     if not exe:
         raise RuntimeError(

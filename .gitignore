@@ -60,9 +60,12 @@ token*
 # --- Build / distribución ----------------------------------------------------
 build/
 dist/
+dist_installer/
+build_deps/
 *.spec
 *.exe
 *.msi
+*.sha256
 
 # --- Temporales / caché del sistema -----------------------------------------
 *.tmp

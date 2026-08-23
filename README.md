@@ -40,10 +40,33 @@ grabaciones. Incluye:
 - **Exportación en 9:16, 16:9 y 1:1**, lista para subir a redes o seguir
   editando en CapCut.
 
-> **Estado actual:** este repositorio contiene el **código fuente** y las
-> instrucciones de instalación (ver [📦 Instalación](#-instalación) más
-> abajo) - todavía no hay un instalador ni un ejecutable `.exe`
-> distribuible, así que por ahora se ejecuta desde el código con Python.
+## Download for Windows
+
+La forma más simple de usar Puppywill AI Clipper: descarga el instalador,
+ábrelo e instala — no necesitas tener Python instalado.
+
+1. Ve a la página de **[Releases](https://github.com/Puppywill/Puppywill-AI-Clipper/releases/latest)**
+   del repositorio.
+2. Descarga `Puppywill-AI-Clipper-Setup-v1.0.0.exe` (junto a su archivo
+   `.sha256` para verificar la descarga si quieres).
+3. Ábrelo y sigue el instalador: crea acceso directo en el escritorio,
+   entrada en el menú Inicio y desinstalador. No requiere privilegios de
+   administrador (se instala en tu carpeta de usuario) ni configurar
+   FFmpeg aparte — ya viene incluido.
+4. Abre "Puppywill AI Clipper" desde el escritorio o el menú Inicio.
+
+**Si Windows SmartScreen muestra una advertencia** ("Windows protegió tu
+PC" / editor no reconocido): el instalador todavía no está firmado
+digitalmente (una firma de código cuesta dinero y no es viable aún para
+este proyecto), así que esto es esperado, no un error. Antes de
+continuar, verifica que lo descargaste desde la página oficial de
+Releases de este repositorio (`github.com/Puppywill/Puppywill-AI-Clipper`)
+y no de otro sitio. **No hay forma segura de "evitar" esta advertencia
+que recomendemos** — solo continúa si confirmaste el origen del archivo
+tú mismo.
+
+¿Prefieres correrlo desde el código fuente con Python en vez del
+instalador? Sigue la sección [📦 Instalación](#-instalación) más abajo.
 
 ## Vista de la aplicación
 
@@ -113,10 +136,16 @@ grabaciones. Incluye:
 
 ## 📋 Requisitos
 
+Si usas el [instalador](#download-for-windows) no necesitas nada de esto
+(FFmpeg ya viene incluido) - esta lista es solo para correr desde el
+código fuente con Python.
+
 - Windows 10/11
 - Python 3.10 - 3.12
 - [FFmpeg](https://ffmpeg.org/download.html) (con `ffmpeg`/`ffprobe` en el PATH)
-- GPU NVIDIA (opcional, solo acelera la exportación vía NVENC)
+- GPU NVIDIA (opcional; acelera tanto el análisis vía NVDEC como la
+  exportación vía NVENC - sin ella todo funciona igual, solo más lento,
+  por CPU)
 - [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) (opcional,
   solo mejora el conteo de multikills leyendo el kill feed en pantalla)
 
@@ -124,6 +153,10 @@ No hace falta PyTorch, CUDA ni ningún framework de IA: la detección de
 momentos usa solo `numpy` (audio) y `opencv-python` (video).
 
 ## 📦 Instalación
+
+Esta sección es para correr **desde el código fuente** con Python. Si
+solo quieres usar la app, descarga el [instalador para Windows](#download-for-windows)
+en vez de esto.
 
 ### 1. Clona el repositorio
 
@@ -180,10 +213,13 @@ numpy). NVENC es opcional.
 python main.py
 ```
 
-## 🖱️ Acceso directo de escritorio (opcional)
+## 🖱️ Acceso directo de escritorio (opcional, para correr desde el código fuente)
 
-El proyecto incluye un launcher de doble clic que no abre ventana de
-consola y verifica dependencias antes de arrancar:
+Si instalaste con el [instalador para Windows](#download-for-windows), ya
+tienes acceso directo en el escritorio y en el menú Inicio - esta
+sección es solo para quien corre la app desde el código fuente con
+Python. El proyecto incluye un launcher de doble clic que no abre
+ventana de consola y verifica dependencias antes de arrancar:
 
 - `run_puppywill.pyw` — verifica FFmpeg/paquetes y abre la interfaz; si
   falta algo, muestra un mensaje claro en vez de fallar en silencio.
