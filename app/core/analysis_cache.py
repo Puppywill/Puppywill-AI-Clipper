@@ -26,10 +26,10 @@ CACHE_VERSION = 1
 CACHE_DIR = get_app_data_dir() / "analysis_cache"
 
 
-def _cache_key(video_path: str, size_bytes: int, mtime: float, mode_name: str,
+def _cache_key(video_path: str, size_bytes: int, mtime: float, mode_key: str,
                sample_fps: float, resize_w: int, clip_len_options: tuple, max_moments: int) -> str:
     raw = "|".join([
-        str(Path(video_path).resolve()), str(size_bytes), str(mtime), mode_name,
+        str(Path(video_path).resolve()), str(size_bytes), str(mtime), mode_key,
         str(sample_fps), str(resize_w), str(clip_len_options), str(max_moments), f"v{CACHE_VERSION}",
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -45,7 +45,7 @@ def load(video_path: str, mode, clip_len_options: tuple, max_moments: int):
     versión vieja simplemente se ignora y se re-analiza)."""
     try:
         st = Path(video_path).stat()
-        key = _cache_key(video_path, st.st_size, st.st_mtime, mode.name,
+        key = _cache_key(video_path, st.st_size, st.st_mtime, mode.key,
                           mode.sample_fps, mode.resize_w, clip_len_options, max_moments)
         path = _cache_path(key)
         if not path.is_file():
@@ -61,7 +61,7 @@ def save(video_path: str, mode, clip_len_options: tuple, max_moments: int, resul
     análisis - simplemente la próxima vez no habrá caché."""
     try:
         st = Path(video_path).stat()
-        key = _cache_key(video_path, st.st_size, st.st_mtime, mode.name,
+        key = _cache_key(video_path, st.st_size, st.st_mtime, mode.key,
                           mode.sample_fps, mode.resize_w, clip_len_options, max_moments)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path = _cache_path(key)

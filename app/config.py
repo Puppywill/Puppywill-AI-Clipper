@@ -31,18 +31,34 @@ def get_app_data_dir() -> Path:
     return d
 
 
+def get_default_export_dir() -> str:
+    """Carpeta sugerida por defecto para los clips exportados (el usuario
+    siempre puede cambiarla, esto es solo el punto de partida). A
+    propósito NO usa "Documents/Pictures/Videos/Desktop" del perfil: en
+    Windows, OneDrive puede redirigir cualquiera de esas carpetas
+    "conocidas" a `...\\OneDrive\\<Carpeta>` sin que se note a simple
+    vista (confirmado en esta misma máquina: Desktop y Pictures están
+    redirigidas, Videos no - varía por PC y por configuración de
+    OneDrive). Para no arriesgarse a subir videos/clips a la nube sin
+    que el usuario lo pida, el valor por defecto es una carpeta plana
+    directamente bajo el perfil (`%USERPROFILE%\\PuppywillClips`), que
+    OneDrive nunca redirige."""
+    return str(Path.home() / "PuppywillClips")
+
+
 CONFIG_PATH = get_app_data_dir() / "settings.json"
 
 
 @dataclass
 class AppSettings:
-    last_export_dir: str = str(Path.home() / "Videos" / "PuppywillClips")
+    last_export_dir: str = field(default_factory=get_default_export_dir)
     default_clip_length: int = 30
     default_aspect_ratio: str = "9:16"
     normalize_audio: bool = True
     prefer_gpu: bool = True
     max_moments_per_video: int = 15
     recent_projects: list = field(default_factory=list)
+    language: str = "es"  # "es" | "en" | "pt" - ver app/i18n.py
 
     def save(self):
         CONFIG_PATH.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False), encoding="utf-8")

@@ -40,12 +40,15 @@ from .proc_utils import AnalysisCancelled, CancelCheck, check_cancel
 from .video_io import VideoInfo, validate_and_probe
 from .scoring import Moment, ScoreWeights
 
-ProgressCB = Optional[Callable[[str, float], None]]  # (etapa, 0..1)
+ProgressCB = Optional[Callable[[str, float], None]]  # (clave de etapa i18n, 0..1)
 
 
 @dataclass(frozen=True)
 class AnalysisMode:
-    name: str
+    key: str    # "fast" | "precise" - estable, NO traducido (identificador interno,
+                # usado para el caché en disco); el texto que ve el usuario sale de
+                # i18n.t(f"mode.{key}") en la UI, nunca de este campo
+    name: str   # nombre legible en español, solo para logs/debug fuera de la UI
     sample_fps: float
     resize_w: int
     max_ocr_candidates: int
@@ -54,11 +57,11 @@ class AnalysisMode:
 # Rápido (predeterminado): menos muestras/segundo y menos candidatos OCR.
 # La decodificación GPU ya hace la parte cara (el decode en sí) igual de
 # rápida en los dos modos - lo que cambia es cuánto se analiza después.
-FAST_MODE = AnalysisMode(name="Rápido", sample_fps=1.5, resize_w=160,
+FAST_MODE = AnalysisMode(key="fast", name="Rápido", sample_fps=1.5, resize_w=160,
                           max_ocr_candidates=kill_events.MAX_OCR_CANDIDATES_FAST)
-PRECISE_MODE = AnalysisMode(name="Preciso", sample_fps=3.0, resize_w=224,
+PRECISE_MODE = AnalysisMode(key="precise", name="Preciso", sample_fps=3.0, resize_w=224,
                              max_ocr_candidates=kill_events.MAX_OCR_CANDIDATES)
-MODES = {FAST_MODE.name: FAST_MODE, PRECISE_MODE.name: PRECISE_MODE}
+MODES = {FAST_MODE.key: FAST_MODE, PRECISE_MODE.key: PRECISE_MODE}
 
 
 @dataclass
@@ -91,14 +94,14 @@ def run_full_analysis(
             progress_cb(stage, frac)
 
     check_cancel(cancel_check)
-    report("Validando video", 0.0)
+    report("stage.validating", 0.0)
     info = validate_and_probe(video_path)
     check_cancel(cancel_check)
 
     if use_cache:
         cached = analysis_cache.load(video_path, mode, clip_len_options, max_moments)
         if cached is not None:
-            report("Cargado desde caché (mismo video y ajustes ya analizados)", 1.0)
+            report("stage.loaded_from_cache", 1.0)
             cached.from_cache = True
             return cached
 
@@ -113,9 +116,9 @@ def run_full_analysis(
     # lo domina el análisis visual, así que el progreso reportado sigue el
     # de `analyze_visual`.
     def _visual_progress(local_frac: float):
-        report("Analizando audio y video (GPU si está disponible)", 0.05 + 0.70 * local_frac)
+        report("stage.analyzing_av", 0.05 + 0.70 * local_frac)
 
-    report("Extrayendo y analizando audio + video", 0.02)
+    report("stage.extract_analyze", 0.02)
     audio_feats = None
     visual_feats = None
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -154,7 +157,7 @@ def run_full_analysis(
 
     check_cancel(cancel_check)
 
-    report("Detectando kills", 0.75)
+    report("stage.detecting_kills", 0.75)
     kill_feats = None
     try:
         kill_feats = kill_events.build_kill_feed_features(
@@ -167,7 +170,7 @@ def run_full_analysis(
         kill_feats = None  # best-effort: si falla, el análisis sigue con las señales genéricas
     check_cancel(cancel_check)
 
-    report("Calculando puntuación combinada", 0.92)
+    report("stage.scoring", 0.92)
     kill_times = kill_feats.times if kill_feats is not None else None
     kill_activity = kill_feats.kill_activity if kill_feats is not None else None
     grid, score = scoring.build_unified_score(
@@ -177,7 +180,7 @@ def run_full_analysis(
 
     kill_event_times = [e.time for e in kill_feats.events] if kill_feats is not None else None
 
-    report("Seleccionando mejores momentos", 0.96)
+    report("stage.selecting_moments", 0.96)
     moments = scoring.find_top_moments(
         grid, score, clip_len_options=clip_len_options, max_moments=max_moments,
         kill_event_times=kill_event_times,
@@ -185,7 +188,7 @@ def run_full_analysis(
     for m in moments:
         scoring.tag_reasons(m, audio_feats, visual_feats)
 
-    report("Análisis completo", 1.0)
+    report("stage.complete", 1.0)
 
     result = AnalysisResult(
         video_info=info,

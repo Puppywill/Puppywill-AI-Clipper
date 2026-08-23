@@ -45,9 +45,16 @@ def main():
         # Un .exe empaquetado no tiene consola donde ver el traceback: sin
         # esto, un error dentro de un slot de Qt mataría la app en
         # silencio. Se muestra en un cuadro de mensaje nativo en su lugar.
+        # Para cuando esto puede dispararse, MainWindow ya aplicó el
+        # idioma guardado del usuario (ver MainWindow.__init__), así que
+        # i18n.t ya refleja el idioma correcto.
+        from app import i18n
         detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         try:
-            QMessageBox.critical(None, APP_TITLE, f"Ocurrió un error inesperado:\n\n{exc_type.__name__}: {exc_value}")
+            QMessageBox.critical(
+                None, APP_TITLE,
+                i18n.t("error.unexpected", type=exc_type.__name__, value=exc_value),
+            )
         except Exception:
             pass
         sys.__excepthook__(exc_type, exc_value, exc_tb)

@@ -8,6 +8,14 @@ video) y los recorta en limpio; la edición final (subtítulos, efectos,
 títulos, música) se hace fuera de la app, p.ej. en CapCut. No hay
 transcripción ni modelos de lenguaje involucrados.
 
+Interfaz disponible en español/English/português (ver ../i18n.py):
+todo el texto se obtiene con `i18n.t("clave")` en vez de estar escrito
+literal aquí, y `retranslate_ui()` vuelve a aplicarlo sobre los mismos
+widgets cuando el usuario cambia el selector de idioma, sin reiniciar
+la app. Los nombres propios (Puppywill AI Clipper, FFmpeg, CapCut...),
+los formatos (9:16, 16:9, 1:1) y las etiquetas de calidad de un clip
+(Kill, Multikill, Best Play, Reaction, Intense Fight) nunca se traducen.
+
 Flujo:
   1. El usuario arrastra o selecciona un video largo (MP4/MKV/MOV).
   2. Pulsa "Analizar" -> AnalysisWorker corre en background (audio +
@@ -43,6 +51,7 @@ except ImportError:
     HAVE_MULTIMEDIA = False
 
 from .. import config
+from .. import i18n
 from ..core.video_io import validate_and_probe, VideoValidationError, SUPPORTED_EXTENSIONS
 from ..core import project as project_mod
 from ..core import scoring
@@ -86,15 +95,15 @@ class MomentListItemWidget(QWidget):
         top_row.setSpacing(10)
         self.checkbox = QCheckBox()
         self.checkbox.setObjectName("MomentCheckbox")
-        self.checkbox.setToolTip("Seleccionar para exportar junto a otros momentos marcados")
+        self.checkbox.setToolTip(i18n.t("tooltip.select_clip"))
         if on_toggle is not None:
             self.checkbox.toggled.connect(self._on_toggled)
             self.checkbox.toggled.connect(lambda checked: on_toggle(index, checked))
         top_row.addWidget(self.checkbox)
 
-        time_label = QLabel(f"#{index+1}  {format_time(moment.start)} – {format_time(moment.end)}")
-        time_label.setStyleSheet("font-weight: 600; font-size: 13px;")
-        top_row.addWidget(time_label)
+        self.time_label = QLabel(f"#{index+1}  {format_time(moment.start)} – {format_time(moment.end)}")
+        self.time_label.setStyleSheet("font-weight: 600; font-size: 13px;")
+        top_row.addWidget(self.time_label)
         top_row.addStretch()
 
         score_label = QLabel(f"{moment.score:.0f}")
@@ -102,10 +111,22 @@ class MomentListItemWidget(QWidget):
         top_row.addWidget(score_label)
         layout.addLayout(top_row)
 
-        reasons_label = QLabel(" · ".join(moment.reasons))
-        reasons_label.setWordWrap(True)
-        reasons_label.setStyleSheet(f"color: {ACCENT_2}; font-size: 11px; padding-left: 28px;")
-        layout.addWidget(reasons_label)
+        self.reasons_label = QLabel()
+        self.reasons_label.setWordWrap(True)
+        self.reasons_label.setStyleSheet(f"color: {ACCENT_2}; font-size: 11px; padding-left: 28px;")
+        layout.addWidget(self.reasons_label)
+        self._render_reasons()
+
+    def _render_reasons(self):
+        # "Generic" es el único marcador traducible en moment.reasons; el
+        # resto (Kill/Multikill/Best Play/Reaction/Intense Fight) es
+        # vocabulario fijo en inglés, se muestra tal cual - ver scoring.py
+        parts = [i18n.t("moment.reason_generic") if r == "Generic" else r for r in self.moment.reasons]
+        self.reasons_label.setText(" · ".join(parts))
+
+    def retranslate(self):
+        self.checkbox.setToolTip(i18n.t("tooltip.select_clip"))
+        self._render_reasons()
 
     def _on_toggled(self, checked: bool):
         # dispara el re-cálculo del QSS con el nuevo valor de la property
@@ -126,6 +147,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.settings = config.AppSettings.load()
+        i18n.set_language(self.settings.language)
 
         self.video_path: str | None = None
         self.video_info = None
@@ -140,9 +162,46 @@ class MainWindow(QMainWindow):
         self._analysis_start_time = 0.0
         self.selected_moment_indices: set[int] = set()
         self._moment_widgets: list[MomentListItemWidget] = []
+        self._loaded_video_name: str | None = None
+        self._status_key = "status.waiting_video"
+        self._status_kwargs: dict = {}
+        # registro genérico para retraducir en el acto: (widget, método, clave)
+        self._i18n_widgets: list[tuple] = []
 
         self._build_ui()
         self.setStyleSheet(DARK_QSS)
+
+    # -------------------------------------------------------------- i18n
+    def _reg(self, widget, key: str, method: str = "setText", **kwargs):
+        """Registra `widget` para retraducción automática y le aplica el
+        texto ya, en el idioma actual."""
+        self._i18n_widgets.append((widget, method, key, kwargs))
+        getattr(widget, method)(i18n.t(key, **kwargs))
+        return widget
+
+    def retranslate_ui(self):
+        for widget, method, key, kwargs in self._i18n_widgets:
+            getattr(widget, method)(i18n.t(key, **kwargs))
+        self._retranslate_mode_combo()
+        self._refresh_dropzone_text()
+        self._update_export_selected_button()
+        self._set_status(self._status_key, **self._status_kwargs)
+        for w in self._moment_widgets:
+            w.retranslate()
+
+    def on_language_changed(self, _index: int = -1):
+        lang = self.combo_language.currentData()
+        if not lang or lang == i18n.current_language():
+            return
+        i18n.set_language(lang)
+        self.settings.language = lang
+        self.settings.save()
+        self.retranslate_ui()
+
+    def _set_status(self, key: str, **kwargs):
+        self._status_key = key
+        self._status_kwargs = kwargs
+        self.log_label.setText(i18n.t(key, **kwargs))
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -170,49 +229,63 @@ class MainWindow(QMainWindow):
 
         brand = QLabel("🐾 Puppywill")
         brand.setObjectName("BrandLabel")
-        sub = QLabel("AI Clipper")
+        sub = self._reg(QLabel(), "brand.sub")
         sub.setObjectName("BrandSubLabel")
         lay.addWidget(brand)
         lay.addWidget(sub)
 
-        lay.addWidget(self._section_title("PROYECTO"))
-        btn_open = QPushButton("📂  Abrir video…")
+        lay.addWidget(self._section_title("section.project"))
+        btn_open = self._reg(QPushButton(), "btn.open_video")
         btn_open.clicked.connect(self.on_open_video)
         lay.addWidget(btn_open)
 
-        btn_load_proj = QPushButton("📁  Cargar proyecto…")
+        btn_load_proj = self._reg(QPushButton(), "btn.load_project")
         btn_load_proj.clicked.connect(self.on_load_project)
         lay.addWidget(btn_load_proj)
 
-        btn_save_proj = QPushButton("💾  Guardar proyecto")
+        btn_save_proj = self._reg(QPushButton(), "btn.save_project")
         btn_save_proj.clicked.connect(self.on_save_project)
         lay.addWidget(btn_save_proj)
 
-        lay.addWidget(self._section_title("ANÁLISIS"))
+        lay.addWidget(self._section_title("section.analysis"))
 
         form = QFormLayout()
         self.spin_max_moments = QSpinBox()
         self.spin_max_moments.setRange(3, 40)
         self.spin_max_moments.setValue(self.settings.max_moments_per_video)
-        form.addRow("Máx. momentos:", self.spin_max_moments)
+        lbl_max_moments = self._reg(QLabel(), "label.max_moments")
+        form.addRow(lbl_max_moments, self.spin_max_moments)
 
         self.combo_mode = QComboBox()
-        self.combo_mode.addItems([FAST_MODE.name, PRECISE_MODE.name])
-        self.combo_mode.setCurrentText(FAST_MODE.name)
-        self.combo_mode.setToolTip(
-            "Rápido: decodificación GPU + menos muestras/candidatos OCR - recomendado.\n"
-            "Preciso: más muestras por segundo y más candidatos OCR, más lento."
-        )
-        form.addRow("Modo:", self.combo_mode)
+        self.combo_mode.addItem(i18n.t("mode.fast"), FAST_MODE.key)
+        self.combo_mode.addItem(i18n.t("mode.precise"), PRECISE_MODE.key)
+        self.combo_mode.setCurrentIndex(0)
+        self._reg(self.combo_mode, "tooltip.mode", method="setToolTip")
+        lbl_mode = self._reg(QLabel(), "label.mode")
+        form.addRow(lbl_mode, self.combo_mode)
         lay.addLayout(form)
 
-        self.btn_analyze = QPushButton("⚡  Analizar Stream")
+        # "Idioma / Language" queda igual en los 3 idiomas a propósito
+        # (es el propio selector de idioma, debe ser autoexplicativo sin
+        # importar cuál esté activo).
+        lang_form = QFormLayout()
+        lbl_language = QLabel("Idioma / Language")
+        self.combo_language = QComboBox()
+        for code, native_name in i18n.LANGUAGES.items():
+            self.combo_language.addItem(native_name, code)
+        idx = self.combo_language.findData(self.settings.language)
+        self.combo_language.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_language.currentIndexChanged.connect(self.on_language_changed)
+        lang_form.addRow(lbl_language, self.combo_language)
+        lay.addLayout(lang_form)
+
+        self.btn_analyze = self._reg(QPushButton(), "btn.analyze")
         self.btn_analyze.setObjectName("PrimaryButton")
         self.btn_analyze.setEnabled(False)
         self.btn_analyze.clicked.connect(self.on_analyze_clicked)
         lay.addWidget(self.btn_analyze)
 
-        self.btn_cancel_analysis = QPushButton("✕  Cancelar análisis")
+        self.btn_cancel_analysis = self._reg(QPushButton(), "btn.cancel_analysis")
         self.btn_cancel_analysis.setVisible(False)
         self.btn_cancel_analysis.clicked.connect(self.on_cancel_analysis_clicked)
         lay.addWidget(self.btn_cancel_analysis)
@@ -221,22 +294,28 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         lay.addWidget(self.progress_bar)
 
-        self.log_label = QLabel("Esperando video…")
+        self.log_label = QLabel(i18n.t(self._status_key))
         self.log_label.setWordWrap(True)
         self.log_label.setStyleSheet("color: #8E8EA0; font-size: 11px; padding: 4px 4px;")
         lay.addWidget(self.log_label)
 
         lay.addStretch()
 
-        gpu_note = QLabel("GPU: se detecta automáticamente\n(NVDEC decode + NVENC export si están disponibles)")
+        gpu_note = self._reg(QLabel(), "label.gpu_note")
         gpu_note.setStyleSheet("color: #6E6E80; font-size: 10px; padding: 8px;")
         gpu_note.setWordWrap(True)
         lay.addWidget(gpu_note)
 
         return sidebar
 
-    def _section_title(self, text: str) -> QLabel:
-        lbl = QLabel(text)
+    def _retranslate_mode_combo(self):
+        self.combo_mode.blockSignals(True)
+        self.combo_mode.setItemText(0, i18n.t("mode.fast"))
+        self.combo_mode.setItemText(1, i18n.t("mode.precise"))
+        self.combo_mode.blockSignals(False)
+
+    def _section_title(self, key: str) -> QLabel:
+        lbl = self._reg(QLabel(), key)
         lbl.setObjectName("SectionTitle")
         lbl.setContentsMargins(16, 0, 16, 0)
         return lbl
@@ -246,11 +325,10 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(16, 16, 16, 16)
 
-        self.drop_zone = QPushButton(
-            "Arrastra aquí tu grabación (MP4 / MKV / MOV)\nde 3+ horas, o haz clic para seleccionar"
-        )
+        self.drop_zone = QPushButton()
         self.drop_zone.setObjectName("DropZone")
         self.drop_zone.clicked.connect(self.on_open_video)
+        self._refresh_dropzone_text()
         lay.addWidget(self.drop_zone)
 
         self.video_info_label = QLabel("")
@@ -258,9 +336,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.video_info_label)
 
         header_row = QHBoxLayout()
-        header_row.addWidget(self._section_title("MEJORES MOMENTOS DETECTADOS"))
+        header_row.addWidget(self._section_title("section.moments"))
         header_row.addStretch()
-        self.selection_count_label = QLabel("Ningún clip seleccionado")
+        self.selection_count_label = self._reg(QLabel(), "label.no_selection")
         self.selection_count_label.setStyleSheet(
             "color: #8E8EA0; font-size: 11px; padding: 10px 4px 4px 4px;"
         )
@@ -273,15 +351,15 @@ class MainWindow(QMainWindow):
 
         selection_row = QHBoxLayout()
         selection_row.setSpacing(8)
-        self.btn_select_all = QPushButton("☑  Seleccionar todos")
-        self.btn_deselect_all = QPushButton("☐  Deseleccionar todos")
+        self.btn_select_all = self._reg(QPushButton(), "btn.select_all")
+        self.btn_deselect_all = self._reg(QPushButton(), "btn.deselect_all")
         self.btn_select_all.clicked.connect(self.on_select_all_clicked)
         self.btn_deselect_all.clicked.connect(self.on_deselect_all_clicked)
         selection_row.addWidget(self.btn_select_all, 1)
         selection_row.addWidget(self.btn_deselect_all, 1)
         lay.addLayout(selection_row)
 
-        self.btn_export_selected = QPushButton("⬇  Exportar seleccionados")
+        self.btn_export_selected = QPushButton(i18n.t("btn.export_selected"))
         self.btn_export_selected.setObjectName("PrimaryButton")
         self.btn_export_selected.setEnabled(False)
         self.btn_export_selected.clicked.connect(self.on_export_selected_clicked)
@@ -293,12 +371,18 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    def _refresh_dropzone_text(self):
+        if self._loaded_video_name:
+            self.drop_zone.setText(i18n.t("dropzone.loaded", name=self._loaded_video_name))
+        else:
+            self.drop_zone.setText(i18n.t("dropzone.default"))
+
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(16, 16, 16, 16)
 
-        lay.addWidget(self._section_title("VISTA PREVIA"))
+        lay.addWidget(self._section_title("section.preview"))
 
         if HAVE_MULTIMEDIA:
             self.video_widget = QVideoWidget()
@@ -309,13 +393,13 @@ class MainWindow(QMainWindow):
             self.media_player.setVideoOutput(self.video_widget)
             lay.addWidget(self.video_widget)
         else:
-            self.video_widget = QLabel("Vista previa no disponible\n(instala PySide6-Addons con QtMultimedia)")
+            self.video_widget = self._reg(QLabel(), "label.no_preview")
             self.video_widget.setAlignment(Qt.AlignCenter)
             self.video_widget.setMinimumHeight(200)
             lay.addWidget(self.video_widget)
 
         preview_controls = QHBoxLayout()
-        self.btn_play = QPushButton("▶ Reproducir momento")
+        self.btn_play = self._reg(QPushButton(), "btn.play")
         self.btn_play.clicked.connect(self.on_play_moment)
         self.btn_stop = QPushButton("⏹")
         self.btn_stop.clicked.connect(self.on_stop_preview)
@@ -323,19 +407,19 @@ class MainWindow(QMainWindow):
         preview_controls.addWidget(self.btn_stop)
         lay.addLayout(preview_controls)
 
-        lay.addWidget(self._section_title("AJUSTE MANUAL DE INICIO/FIN"))
+        lay.addWidget(self._section_title("section.trim"))
         self.slider_start = QSlider(Qt.Horizontal)
         self.slider_end = QSlider(Qt.Horizontal)
         self.label_trim = QLabel("00:00 – 00:00")
         for s in (self.slider_start, self.slider_end):
             s.valueChanged.connect(self.on_trim_changed)
-        lay.addWidget(QLabel("Inicio:"))
+        lay.addWidget(self._reg(QLabel(), "label.start"))
         lay.addWidget(self.slider_start)
-        lay.addWidget(QLabel("Fin:"))
+        lay.addWidget(self._reg(QLabel(), "label.end"))
         lay.addWidget(self.slider_end)
         lay.addWidget(self.label_trim)
 
-        lay.addWidget(self._section_title("EXPORTACIÓN"))
+        lay.addWidget(self._section_title("section.export"))
         export_box = QGroupBox()
         export_form = QFormLayout(export_box)
 
@@ -343,23 +427,24 @@ class MainWindow(QMainWindow):
         self.combo_length.addItems(["15", "30", "45", "60"])
         self.combo_length.setCurrentText(str(self.settings.default_clip_length))
         self.combo_length.currentTextChanged.connect(self.on_length_changed)
-        export_form.addRow("Duración (s):", self.combo_length)
+        lbl_duration = self._reg(QLabel(), "label.duration")
+        export_form.addRow(lbl_duration, self.combo_length)
 
-        self.chk_vertical = QCheckBox("Vertical 9:16 (TikTok/Reels/Shorts)")
-        self.chk_horizontal = QCheckBox("Horizontal 16:9 (YouTube)")
-        self.chk_square = QCheckBox("Cuadrado 1:1 (Feed)")
+        self.chk_vertical = self._reg(QCheckBox(), "chk.vertical")
+        self.chk_horizontal = self._reg(QCheckBox(), "chk.horizontal")
+        self.chk_square = self._reg(QCheckBox(), "chk.square")
         self.chk_vertical.setChecked(True)
         export_form.addRow(self.chk_vertical)
         export_form.addRow(self.chk_horizontal)
         export_form.addRow(self.chk_square)
 
-        self.chk_normalize = QCheckBox("Normalizar audio")
+        self.chk_normalize = self._reg(QCheckBox(), "chk.normalize")
         self.chk_normalize.setChecked(True)
         export_form.addRow(self.chk_normalize)
 
         lay.addWidget(export_box)
 
-        self.btn_export = QPushButton("⬇  Exportar Clip")
+        self.btn_export = self._reg(QPushButton(), "btn.export_clip")
         self.btn_export.setObjectName("PrimaryButton")
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self.on_export_clicked)
@@ -384,13 +469,13 @@ class MainWindow(QMainWindow):
         if Path(path).suffix.lower() in SUPPORTED_EXTENSIONS:
             self._load_video(path)
         else:
-            QMessageBox.warning(self, APP_NAME, "Formato no soportado. Usa MP4, MKV o MOV.")
+            QMessageBox.warning(self, APP_NAME, i18n.t("warn.unsupported_format"))
 
     # ------------------------------------------------------------- Acciones
     def on_open_video(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Selecciona una grabación", str(Path.home()),
-            "Videos (*.mp4 *.mkv *.mov)"
+            self, i18n.t("dialog.select_recording"), str(Path.home()),
+            i18n.t("filter.videos")
         )
         if path:
             self._load_video(path)
@@ -409,10 +494,11 @@ class MainWindow(QMainWindow):
             f"📹 {Path(path).name}  —  {info.width}x{info.height} @ {info.fps:.0f}fps  —  "
             f"{hours:.1f}h  —  {info.video_codec}/{info.audio_codec}"
         )
-        self.drop_zone.setText(f"✅ Cargado: {Path(path).name}\n(Haz clic para elegir otro video)")
+        self._loaded_video_name = Path(path).name
+        self._refresh_dropzone_text()
         self.btn_analyze.setEnabled(True)
         self.moment_list.clear()
-        self.log_label.setText("Video cargado. Listo para analizar.")
+        self._set_status("status.video_loaded")
 
         if HAVE_MULTIMEDIA:
             self.media_player.setSource(QUrl.fromLocalFile(path))
@@ -425,7 +511,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self._analysis_start_time = time.monotonic()
 
-        mode = MODES.get(self.combo_mode.currentText(), FAST_MODE)
+        mode = MODES.get(self.combo_mode.currentData(), FAST_MODE)
         self.worker = AnalysisWorker(
             video_path=self.video_path,
             work_dir=self.work_dir,
@@ -442,17 +528,19 @@ class MainWindow(QMainWindow):
     def on_cancel_analysis_clicked(self):
         if hasattr(self, "worker") and self.worker.isRunning():
             self.btn_cancel_analysis.setEnabled(False)
-            self.log_label.setText("Cancelando… (esperando a que FFmpeg termine el frame actual)")
+            self._set_status("status.cancelling")
             self.worker.request_cancel()
 
-    def on_analysis_progress(self, stage: str, frac: float):
+    def on_analysis_progress(self, stage_key: str, frac: float):
         self.progress_bar.setValue(int(frac * 100))
-        eta_text = ""
         elapsed = time.monotonic() - self._analysis_start_time
         if 0.03 < frac < 0.995 and elapsed > 1.0:
             remaining = elapsed * (1.0 - frac) / frac
-            eta_text = f"  —  ~{format_time(max(0.0, remaining))} restantes"
-        self.log_label.setText(f"{stage}{eta_text}")
+            eta_text = i18n.t("eta.remaining", t=format_time(max(0.0, remaining)))
+        else:
+            eta_text = ""
+        self.log_label.setText(f"{i18n.t(stage_key)}{eta_text}")
+        self._status_key, self._status_kwargs = stage_key, {}
 
     def _analysis_ui_reset(self):
         self.btn_analyze.setEnabled(True)
@@ -477,20 +565,20 @@ class MainWindow(QMainWindow):
             self.moment_list.setItemWidget(item, widget)
             self._moment_widgets.append(widget)
         self._update_export_selected_button()
-        cache_note = " (cargado desde caché)" if getattr(result, "from_cache", False) else ""
-        self.log_label.setText(f"{len(result.moments)} momentos encontrados{cache_note}.")
+        status_key = "status.moments_found_cached" if getattr(result, "from_cache", False) else "status.moments_found"
+        self._set_status(status_key, n=len(result.moments))
         if not result.moments:
-            QMessageBox.information(self, APP_NAME, "No se encontraron momentos destacados claros. Prueba bajando el umbral o revisando el audio del video.")
+            QMessageBox.information(self, APP_NAME, i18n.t("status.no_moments_found"))
 
     def on_analysis_failed(self, error: str):
         self._analysis_ui_reset()
-        self.log_label.setText("Error en el análisis.")
-        QMessageBox.critical(self, APP_NAME, f"El análisis falló:\n\n{error}")
+        self._set_status("status.analysis_error")
+        QMessageBox.critical(self, APP_NAME, i18n.t("error.analysis_failed", error=error))
 
     def on_analysis_cancelled(self):
         self._analysis_ui_reset()
         self.progress_bar.setValue(0)
-        self.log_label.setText("Análisis cancelado.")
+        self._set_status("status.analysis_cancelled")
 
     # -------------------------------------------------- Selección múltiple
     def _on_moment_checkbox_toggled(self, index: int, checked: bool):
@@ -502,15 +590,15 @@ class MainWindow(QMainWindow):
 
     def _update_export_selected_button(self):
         n = len(self.selected_moment_indices)
-        self.btn_export_selected.setText(f"⬇  Exportar seleccionados ({n})" if n else "⬇  Exportar seleccionados")
+        self.btn_export_selected.setText(i18n.t("btn.export_selected_n", n=n) if n else i18n.t("btn.export_selected"))
         self.btn_export_selected.setEnabled(n > 0)
         total = len(self._moment_widgets)
         if n == 0:
-            self.selection_count_label.setText("Ningún clip seleccionado")
+            self.selection_count_label.setText(i18n.t("label.no_selection"))
         elif n == total:
-            self.selection_count_label.setText(f"Los {n} clips seleccionados")
+            self.selection_count_label.setText(i18n.t("label.all_selected", n=n))
         else:
-            self.selection_count_label.setText(f"{n} de {total} clips seleccionados")
+            self.selection_count_label.setText(i18n.t("label.partial_selected", n=n, total=total))
 
     def on_select_all_clicked(self):
         for w in self._moment_widgets:
@@ -614,7 +702,7 @@ class MainWindow(QMainWindow):
 
     def on_export_clicked(self):
         if self.current_moment_index is None or not self.video_path or not self.video_info:
-            QMessageBox.warning(self, APP_NAME, "Selecciona un momento de la lista antes de exportar.")
+            QMessageBox.warning(self, APP_NAME, i18n.t("warn.select_moment_first"))
             return
 
         aspects = []
@@ -625,7 +713,7 @@ class MainWindow(QMainWindow):
         if self.chk_square.isChecked():
             aspects.append("1:1")
         if not aspects:
-            QMessageBox.warning(self, APP_NAME, "Selecciona al menos un formato de exportación.")
+            QMessageBox.warning(self, APP_NAME, i18n.t("warn.select_format"))
             return
 
         self._export_queue = aspects
@@ -637,7 +725,7 @@ class MainWindow(QMainWindow):
         if not self._export_queue:
             self.btn_export.setEnabled(True)
             if self._exported_count > 0:
-                QMessageBox.information(self, APP_NAME, "Exportación completa. Revisa tu carpeta de clips.")
+                QMessageBox.information(self, APP_NAME, i18n.t("info.export_complete"))
             return
 
         ratio = self._export_queue.pop(0)
@@ -663,7 +751,7 @@ class MainWindow(QMainWindow):
         suggested_path = str(default_dir / suggested_name)
 
         out_path, _ = QFileDialog.getSaveFileName(
-            self, f"Guardar clip ({ratio})", suggested_path, "Video MP4 (*.mp4)"
+            self, i18n.t("dialog.save_clip", ratio=ratio), suggested_path, i18n.t("filter.mp4")
         )
         if not out_path:
             return None
@@ -692,7 +780,7 @@ class MainWindow(QMainWindow):
             work_dir=self.work_dir,
         )
         self.export_worker.progress.connect(
-            lambda stage, frac: (self.export_progress.setValue(int(frac * 100)), self.log_label.setText(stage))
+            lambda stage_key, frac: (self.export_progress.setValue(int(frac * 100)), self._set_status(stage_key))
         )
         self.export_worker.finished_ok.connect(self._on_single_export_done)
         self.export_worker.failed.connect(self._on_export_failed)
@@ -700,17 +788,17 @@ class MainWindow(QMainWindow):
 
     def _on_single_export_done(self, out_path: str):
         self._exported_count += 1
-        self.log_label.setText(f"Exportado: {out_path}")
+        self._set_status("status.exported", path=out_path)
         self._run_next_export()
 
     def _on_export_failed(self, error: str):
         self.btn_export.setEnabled(True)
-        QMessageBox.critical(self, APP_NAME, f"La exportación falló:\n\n{error}")
+        QMessageBox.critical(self, APP_NAME, i18n.t("error.export_failed", error=error))
 
     # --------------------------------------------------- Exportación por lotes
     def on_export_selected_clicked(self):
         if not self.selected_moment_indices:
-            QMessageBox.warning(self, APP_NAME, "Marca la casilla de al menos un momento antes de exportar.")
+            QMessageBox.warning(self, APP_NAME, i18n.t("warn.select_at_least_one_moment"))
             return
         if not self.video_path or not self.video_info or not self.analysis_result:
             return
@@ -723,11 +811,11 @@ class MainWindow(QMainWindow):
         if self.chk_square.isChecked():
             aspects.append("1:1")
         if not aspects:
-            QMessageBox.warning(self, APP_NAME, "Selecciona al menos un formato de exportación.")
+            QMessageBox.warning(self, APP_NAME, i18n.t("warn.select_format"))
             return
 
         dest_dir = QFileDialog.getExistingDirectory(
-            self, "Carpeta de destino para los clips seleccionados", self.settings.last_export_dir
+            self, i18n.t("dialog.batch_dest_folder"), self.settings.last_export_dir
         )
         if not dest_dir:
             return  # el usuario canceló: no se exporta nada, el estado/selección queda intacto
@@ -785,13 +873,13 @@ class MainWindow(QMainWindow):
                     source_video=self.video_path, out_path=str(out_path),
                     start=float(start), end=float(end), options=options,
                     src_width=self.video_info.width, src_height=self.video_info.height,
-                    label=f"Momento #{idx + 1} ({ratio})",
+                    label=i18n.t("moment.label", n=idx + 1, ratio=ratio),
                 ))
         return jobs
 
     def on_batch_progress(self, i: int, total: int, label: str):
         self.batch_progress.setValue(int((i - 1) / total * 100))
-        self.log_label.setText(f"Exportando {i} de {total}: {label}")
+        self._set_status("status.exporting_n_of_m", i=i, total=total, label=label)
 
     def _batch_ui_reset(self):
         self.btn_export.setEnabled(True)
@@ -808,24 +896,21 @@ class MainWindow(QMainWindow):
         dest_dir = getattr(self, "_batch_dest_dir", "")
 
         if failed_results:
-            self.log_label.setText(
-                f"{len(ok_results)} de {total} clips exportados correctamente "
-                f"({len(failed_results)} fallaron)."
-            )
+            self._set_status("status.batch_done_with_fails", ok=len(ok_results), total=total, failed=len(failed_results))
         else:
-            self.log_label.setText(f"{len(ok_results)} de {total} clips exportados correctamente.")
+            self._set_status("status.batch_done", ok=len(ok_results), total=total)
 
         if failed_results:
             failed_lines = "\n".join(f"• {r.job.label}: {r.error[:200]}" for r in failed_results)
             QMessageBox.warning(
                 self, APP_NAME,
-                f"{len(ok_results)} de {total} clips exportados correctamente en:\n{dest_dir}\n\n"
-                f"Fallaron {len(failed_results)}:\n{failed_lines}"
+                i18n.t("msg.batch_warning_body", ok=len(ok_results), total=total, dest=dest_dir,
+                       failed=len(failed_results), lines=failed_lines)
             )
         else:
             QMessageBox.information(
                 self, APP_NAME,
-                f"{len(ok_results)} de {total} clips exportados correctamente en:\n{dest_dir}"
+                i18n.t("msg.batch_info_body", ok=len(ok_results), total=total, dest=dest_dir)
             )
         # el video, los resultados del análisis y la selección de casillas
         # quedan intactos: se puede seguir reproduciendo, ajustando y
@@ -834,9 +919,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- Proyecto
     def on_save_project(self):
         if not self.video_path or not self.analysis_result:
-            QMessageBox.information(self, APP_NAME, "Analiza un video antes de guardar el proyecto.")
+            QMessageBox.information(self, APP_NAME, i18n.t("info.analyze_before_save"))
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Guardar proyecto", str(Path.home()), "Proyecto (*.pwproj)")
+        path, _ = QFileDialog.getSaveFileName(self, i18n.t("dialog.save_project"), str(Path.home()), i18n.t("filter.project"))
         if not path:
             return
         data = project_mod.ProjectData(
@@ -845,20 +930,15 @@ class MainWindow(QMainWindow):
             moments=[project_mod.moment_to_dict(m) for m in self.analysis_result.moments],
         )
         project_mod.save_project(data, path)
-        QMessageBox.information(self, APP_NAME, "Proyecto guardado.")
+        QMessageBox.information(self, APP_NAME, i18n.t("info.project_saved"))
 
     def on_load_project(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Cargar proyecto", str(Path.home()), "Proyecto (*.pwproj)")
+        path, _ = QFileDialog.getOpenFileName(self, i18n.t("dialog.load_project"), str(Path.home()), i18n.t("filter.project"))
         if not path:
             return
         data = project_mod.load_project(path)
         self._load_video(data.video_path)
-        QMessageBox.information(
-            self, APP_NAME,
-            "Proyecto cargado. Vuelve a pulsar 'Analizar' si quieres regenerar los momentos "
-            "(guardamos los datos, pero el MVP re-analiza para simplificar; en una fase futura "
-            "restauraremos los momentos guardados sin reanalizar)."
-        )
+        QMessageBox.information(self, APP_NAME, i18n.t("info.project_loaded"))
 
     def closeEvent(self, event):
         self.settings.default_clip_length = int(self.combo_length.currentText())

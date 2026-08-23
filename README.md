@@ -39,6 +39,10 @@ grabaciones. Incluye:
   todos con nombres únicos.
 - **Exportación en 9:16, 16:9 y 1:1**, lista para subir a redes o seguir
   editando en CapCut.
+- **Interfaz en Español, English y Português**: selector "Idioma /
+  Language" en la barra lateral, español por defecto. El cambio se
+  aplica al instante, sin reiniciar la app, y se recuerda la próxima
+  vez que la abras.
 
 ## Download for Windows
 
@@ -49,11 +53,15 @@ La forma más simple de usar Puppywill AI Clipper: descarga el instalador,
    del repositorio.
 2. Descarga `Puppywill-AI-Clipper-Setup-v1.0.0.exe` (junto a su archivo
    `.sha256` para verificar la descarga si quieres).
-3. Ábrelo y sigue el instalador: crea acceso directo en el escritorio,
-   entrada en el menú Inicio y desinstalador. No requiere privilegios de
-   administrador (se instala en tu carpeta de usuario) ni configurar
+3. Ábrelo y sigue el instalador (disponible en Español, English y
+   Português): siempre crea entrada en el menú Inicio, y te deja elegir
+   si además quieres acceso directo en el escritorio y en qué carpeta
+   instalar (por defecto, una ubicación local, nunca OneDrive). Incluye
+   desinstalador. No requiere privilegios de administrador ni configurar
    FFmpeg aparte — ya viene incluido.
 4. Abre "Puppywill AI Clipper" desde el escritorio o el menú Inicio.
+   Dentro de la app, la interfaz también se puede cambiar de idioma en
+   cualquier momento desde la barra lateral.
 
 **Si Windows SmartScreen muestra una advertencia** ("Windows protegió tu
 PC" / editor no reconocido): el instalador todavía no está firmado

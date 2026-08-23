@@ -79,12 +79,12 @@ class ExportWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit("Exportando clip con FFmpeg", 0.4)
+            self.progress.emit("stage.exporting_ffmpeg", 0.4)
             out = export_clip(
                 self.source_video, self.out_path, self.clip_start, self.clip_end,
                 self.options, self.src_width, self.src_height,
             )
-            self.progress.emit("Completado", 1.0)
+            self.progress.emit("stage.export_complete", 1.0)
             self.finished_ok.emit(out)
         except Exception as e:
             import traceback

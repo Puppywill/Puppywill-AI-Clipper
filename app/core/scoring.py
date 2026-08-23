@@ -401,4 +401,8 @@ def tag_reasons(moment: Moment, audio: AudioFeatures, visual: Optional[VisualFea
         moment.reasons.append("Reaction")
 
     if not moment.reasons:
-        moment.reasons.append("Combinación moderada de señales")
+        # "Generic" es un marcador interno, no texto para mostrar: la UI lo
+        # traduce vía i18n.t("moment.reason_generic") al idioma activo. Las
+        # demás etiquetas (Kill/Multikill/Best Play/Reaction/Intense Fight)
+        # son vocabulario fijo en inglés y se muestran tal cual.
+        moment.reasons.append("Generic")
