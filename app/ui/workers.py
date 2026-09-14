@@ -26,13 +26,17 @@ class AnalysisWorker(QThread):
 
     def __init__(self, video_path: str, work_dir: str,
                  clip_len_options: tuple, max_moments: int,
-                 mode: AnalysisMode = FAST_MODE, parent=None):
+                 mode: AnalysisMode = FAST_MODE,
+                 detection_mode: str = "general", game_key: str = "auto",
+                 parent=None):
         super().__init__(parent)
         self.video_path = video_path
         self.work_dir = work_dir
         self.clip_len_options = clip_len_options
         self.max_moments = max_moments
         self.mode = mode
+        self.detection_mode = detection_mode
+        self.game_key = game_key
         self._cancel_event = threading.Event()
 
     def request_cancel(self):
@@ -45,6 +49,8 @@ class AnalysisWorker(QThread):
                 clip_len_options=self.clip_len_options,
                 max_moments=self.max_moments,
                 mode=self.mode,
+                detection_mode=self.detection_mode,
+                game_key=self.game_key,
                 progress_cb=lambda stage, frac: self.progress.emit(stage, frac),
                 cancel_check=self._cancel_event.is_set,
             )

@@ -58,6 +58,29 @@ class ScoreWeights:
 
 
 @dataclass
+class GamingScoreWeights:
+    """Pesos del modo Gaming: valores iniciales conservadores (Fase 2 del
+    plan de Gaming Mode) - pendientes de calibrar con footage real de
+    Marvel Rivals en la Fase 3, no hay forma de ajustarlos bien sin eso.
+    Los eventos discretos (kill/ultimate/round_end) pesan más que en
+    General porque son señales más específicas de "esto es un momento
+    de juego", no solo "esto suena/se ve intenso"."""
+    audio_peak: float = 0.6
+    laughter: float = 0.5
+    motion: float = 0.5
+    scene_cut: float = 0.4
+    optical_flow: float = 0.8       # movimiento de cámara/apuntado real, más específico que motion_score
+    brightness_spike: float = 0.4  # flashes/explosiones/pantallas completas
+    kill_activity: float = 1.3
+    ultimate_activity: float = 1.1
+    round_end_activity: float = 0.9
+    # bonus (no multiplicador) por CADA señal adicional que coincide en el
+    # mismo instante (kill + pico de audio + corte de escena a la vez, etc.)
+    # - pide el usuario explícitamente: "varias señales juntas = bonus"
+    coincidence_bonus: float = 15.0
+
+
+@dataclass
 class Moment:
     start: float
     end: float
@@ -128,6 +151,81 @@ def build_unified_score(
         score = score + weights.kill_activity * kill
 
     # normalizar a 0..100 para que sea legible en la UI
+    if score.max() > 0:
+        score = 100.0 * score / (score.max() + 1e-9)
+
+    return grid, score
+
+
+def build_gaming_score(
+    audio: AudioFeatures,
+    visual: Optional[VisualFeatures] = None,
+    gaming_feats=None,
+    weights: GamingScoreWeights = GamingScoreWeights(),
+    grid_step: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Igual forma que `build_unified_score`, pero con las señales del
+    modo Gaming (optical flow, brillo, ultimate, fin de ronda) y un bonus
+    explícito de coincidencia: si 2+ tipos de señal superan su propio
+    umbral en el mismo instante (p.ej. un kill que además coincide con
+    un pico de audio y un corte de escena), se suma un bonus además de
+    la suma ponderada normal - así un momento donde "pasan varias cosas
+    a la vez" queda por encima de uno con una sola señal fuerte aislada,
+    tal como se pidió.
+
+    `gaming_feats` es un `gaming_events.GamingFeatures` (opcional). Sin
+    él, el score sigue funcionando solo con audio/video genéricos del
+    modo Gaming (optical flow, brillo), sin las señales de kill/ultimate/
+    fin de ronda.
+    """
+    duration = audio.duration_sec
+    if visual is not None and visual.duration_sec > 0:
+        duration = max(duration, visual.duration_sec)
+
+    grid = np.arange(0, duration, grid_step, dtype=np.float32)
+    if len(grid) == 0:
+        grid = np.array([0.0], dtype=np.float32)
+
+    peak = resample_to_grid(audio.times, audio.peak_score, grid)
+    laugh = resample_to_grid(audio.times, audio.laughter_score, grid)
+    score = weights.audio_peak * peak + weights.laughter * laugh
+    signal_layers = [peak > 0.5]
+
+    if visual is not None and len(visual.times) > 0:
+        motion = resample_to_grid(visual.times, visual.motion_score, grid)
+        scene = resample_to_grid(visual.times, visual.scene_cut_score, grid)
+        score = score + weights.motion * motion + weights.scene_cut * scene
+        signal_layers.append(scene > 0.6)
+
+        flow = getattr(visual, "optical_flow_score", None)
+        if flow is not None and len(flow) > 0:
+            flow_g = resample_to_grid(visual.times, flow, grid)
+            score = score + weights.optical_flow * flow_g
+            signal_layers.append(flow_g > 0.6)
+
+        bright = getattr(visual, "brightness_spike", None)
+        if bright is not None and len(bright) > 0:
+            bright_g = resample_to_grid(visual.times, bright, grid)
+            score = score + weights.brightness_spike * bright_g
+            signal_layers.append(bright_g > 0.6)
+
+    if gaming_feats is not None:
+        kill_g = resample_to_grid(gaming_feats.times, gaming_feats.kill_activity, grid)
+        score = score + weights.kill_activity * kill_g
+        signal_layers.append(kill_g > 0.5)
+
+        ult_g = resample_to_grid(gaming_feats.times, gaming_feats.ultimate_activity, grid)
+        score = score + weights.ultimate_activity * ult_g
+        signal_layers.append(ult_g > 0.5)
+
+        round_g = resample_to_grid(gaming_feats.times, gaming_feats.round_end_activity, grid)
+        score = score + weights.round_end_activity * round_g
+        signal_layers.append(round_g > 0.5)
+
+    if signal_layers:
+        coincidence_count = np.vstack(signal_layers).astype(np.int32).sum(axis=0)
+        score = score + np.clip(coincidence_count - 1, 0, None) * weights.coincidence_bonus
+
     if score.max() > 0:
         score = 100.0 * score / (score.max() + 1e-9)
 
@@ -298,34 +396,26 @@ def _count_kills_in_window(kill_event_times: list[float], start: float, end: flo
     return sum(1 for t in kill_event_times if start <= t <= end)
 
 
-def find_top_moments(
+def _build_moment_candidates(
     grid: np.ndarray,
     score: np.ndarray,
-    clip_len_options: tuple[int, ...] = (15, 30, 45, 60),
-    max_moments: int = 15,
-    min_gap_seconds: float = 20.0,
-    kill_event_times: Optional[list[float]] = None,
+    clip_len_options: tuple[int, ...],
+    max_moments: int,
+    min_gap_seconds: float,
 ) -> list[Moment]:
-    """Encuentra los mejores momentos: detecta picos de intensidad
-    (más candidatos de los que se entregan), construye para cada uno la
-    mejor ventana entre las duraciones candidatas (pico ~60-75% del
-    clip, bordes en tramos tranquilos), puntúa su calidad 0..100, y
-    entrega solo los mejores y más distintos (picos cercanos = misma
-    jugada, se quedan con uno solo), ordenados de mayor a menor
-    puntuación.
-
-    `kill_event_times` (opcional, ver kill_events.py: `[e.time for e in
-    kill_feats.events]`) son los instantes exactos de kills ya detectados
-    - se usan para contar kills por clip (Kill/Multikill) y para marcar
-    el mejor momento como "Best Play". La señal continua de kills (para
-    el score en sí) se suma antes, en build_unified_score.
-    """
+    """Núcleo compartido por `find_top_moments` (modo General) y
+    `find_top_gaming_moments` (modo Gaming): detecta picos de intensidad,
+    construye para cada uno la mejor ventana entre las duraciones
+    candidatas (pico ~60-75%, bordes en tramos tranquilos), puntúa su
+    calidad 0..100, y agrupa picos cercanos (misma jugada -> un solo
+    clip), ordenados de mayor a menor puntuación. No pone etiquetas
+    (Kill/Multikill/Best Play/...) - eso lo hace cada llamador, porque el
+    vocabulario difiere entre General y Gaming."""
     if len(grid) < 2:
         return []
 
     video_duration = float(grid[-1])
     static_mask = _static_mask(grid, score)
-    have_kills = bool(kill_event_times)
 
     n_peak_candidates = max(max_moments * 4, 20)
     peak_candidates = _find_peak_times(
@@ -357,7 +447,47 @@ def find_top_moments(
         if len(accepted) >= max_moments:
             break
 
-    if have_kills:
+    return accepted
+
+
+def _tag_intense_fight(grid: np.ndarray, score: np.ndarray, accepted: list[Moment],
+                        threshold: float = 55.0) -> None:
+    for m in accepted:
+        wmask = (grid >= m.start) & (grid <= m.end)
+        if np.any(wmask) and float(np.mean(score[wmask] > threshold)) >= 0.5:
+            m.reasons.append("Intense Fight")
+
+
+def _finalize_best_play(accepted: list[Moment]) -> list[Moment]:
+    # ordenar por puntuación (de mejor a peor) para mostrarlos así en la UI
+    accepted.sort(key=lambda m: m.score, reverse=True)
+    if accepted:
+        accepted[0].reasons.insert(0, "Best Play")
+    return accepted
+
+
+def find_top_moments(
+    grid: np.ndarray,
+    score: np.ndarray,
+    clip_len_options: tuple[int, ...] = (15, 30, 45, 60),
+    max_moments: int = 15,
+    min_gap_seconds: float = 20.0,
+    kill_event_times: Optional[list[float]] = None,
+) -> list[Moment]:
+    """Modo General: encuentra los mejores momentos y entrega solo los
+    mejores y más distintos, ordenados de mayor a menor puntuación.
+
+    `kill_event_times` (opcional, ver kill_events.py: `[e.time for e in
+    kill_feats.events]`) son los instantes exactos de kills ya detectados
+    - se usan para contar kills por clip (Kill/Multikill) y para marcar
+    el mejor momento como "Best Play". La señal continua de kills (para
+    el score en sí) se suma antes, en build_unified_score.
+    """
+    accepted = _build_moment_candidates(grid, score, clip_len_options, max_moments, min_gap_seconds)
+    if not accepted:
+        return accepted
+
+    if kill_event_times:
         for m in accepted:
             m.kill_count = _count_kills_in_window(kill_event_times, m.start, m.end)
             if m.kill_count >= 2:
@@ -365,18 +495,55 @@ def find_top_moments(
             elif m.kill_count == 1:
                 m.reasons.append("Kill")
 
-    intense_threshold = 55.0
-    for m in accepted:
-        wmask = (grid >= m.start) & (grid <= m.end)
-        if np.any(wmask) and float(np.mean(score[wmask] > intense_threshold)) >= 0.5:
-            m.reasons.append("Intense Fight")
+    _tag_intense_fight(grid, score, accepted)
+    return _finalize_best_play(accepted)
 
-    # ordenar por puntuación (de mejor a peor) para mostrarlos así en la UI
-    accepted.sort(key=lambda m: m.score, reverse=True)
-    if accepted:
-        accepted[0].reasons.insert(0, "Best Play")
 
-    return accepted
+def find_top_gaming_moments(
+    grid: np.ndarray,
+    score: np.ndarray,
+    gaming_feats=None,
+    clip_len_options: tuple[int, ...] = (15, 30, 45, 60),
+    max_moments: int = 15,
+    min_gap_seconds: float = 20.0,
+) -> list[Moment]:
+    """Modo Gaming: mismo núcleo de detección de picos/ventanas que el
+    modo General (`_build_moment_candidates`), con vocabulario de
+    etiquetas propio: Kill, Multikill (varias eliminaciones muy juntas,
+    p.ej. team wipe/ace), Killstreak (varias eliminaciones repartidas en
+    una ventana más amplia sin pausas grandes), Ultimate, Round End,
+    Intense Fight, Best Play. `gaming_feats` es un
+    `gaming_events.GamingFeatures` (opcional - si falta, el momento
+    queda sin esas etiquetas pero la detección genérica sigue
+    funcionando)."""
+    from .gaming_events import group_kill_streaks  # import perezoso: evita ciclo de módulos en tiempo de carga
+
+    accepted = _build_moment_candidates(grid, score, clip_len_options, max_moments, min_gap_seconds)
+    if not accepted:
+        return accepted
+
+    if gaming_feats is not None:
+        kill_times = [e.time for e in gaming_feats.kill_events]
+        ultimate_times = [e.time for e in gaming_feats.ultimate_events]
+        round_end_times = [e.time for e in gaming_feats.round_end_events]
+
+        for m in accepted:
+            kills_in_window = [t for t in kill_times if m.start <= t <= m.end]
+            m.kill_count = len(kills_in_window)
+            if m.kill_count >= 2:
+                grouping = group_kill_streaks(kills_in_window)
+                label = next(iter(grouping.values()), "multikill_moment")
+                m.reasons.append("Multikill" if label == "multikill_moment" else "Killstreak")
+            elif m.kill_count == 1:
+                m.reasons.append("Kill")
+
+            if any(m.start <= t <= m.end for t in ultimate_times):
+                m.reasons.append("Ultimate")
+            if any(m.start <= t <= m.end for t in round_end_times):
+                m.reasons.append("Round End")
+
+    _tag_intense_fight(grid, score, accepted)
+    return _finalize_best_play(accepted)
 
 
 def tag_reasons(moment: Moment, audio: AudioFeatures, visual: Optional[VisualFeatures]) -> None:

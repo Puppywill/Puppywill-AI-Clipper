@@ -62,6 +62,18 @@ class VisualFeatures:
     # KILL_FEED_ROI_FRAC); puede quedar en ~0 si esa zona no muestra HUD
     kill_roi_activity: np.ndarray = field(default_factory=lambda: np.array([]))
     decode_method: str = ""    # "gpu" | "cpu" | "cpu_cv2" - informativo, para logs/diagnóstico
+    # --- señales adicionales, solo se calculan si se piden (modo Gaming) ---
+    # 0..1 cambio brusco de luminancia media del frame completo (flashes,
+    # explosiones, transición de ultimate/victoria-derrota a pantalla completa)
+    brightness_spike: np.ndarray = field(default_factory=lambda: np.array([]))
+    # nombre de región (ver app/core/games/) -> actividad 0..1, análogo a
+    # kill_roi_activity pero generalizado a N regiones nombradas del perfil
+    # de juego activo (kill_feed/ultimate_bar/round_banner...)
+    hud_regions_activity: dict = field(default_factory=dict)
+    # 0..1 magnitud media de optical flow (Farneback) entre frames
+    # consecutivos - más caro que motion_score, por eso es opcional
+    # (`compute_optical_flow=True`, solo en modo Gaming)
+    optical_flow_score: np.ndarray = field(default_factory=lambda: np.array([]))
 
 
 def _norm01(x: np.ndarray) -> np.ndarray:
@@ -144,16 +156,23 @@ def _sample_frames_ffmpeg(
 
 
 def _analyze_from_frame_stream(frame_iter, sample_fps: float, duration_sec: float,
-                                decode_method: str) -> VisualFeatures:
+                                decode_method: str,
+                                hud_regions: Optional[dict] = None,
+                                compute_optical_flow: bool = False) -> VisualFeatures:
     roi_x0f, roi_y0f, roi_x1f, roi_y1f = KILL_FEED_ROI_FRAC
+    hud_regions = hud_regions or {}
 
     prev_gray = None
     prev_hist = None
     prev_roi_gray = None
+    prev_hud_crops: dict = {}
     times = []
     motion_vals = []
     scene_vals = []
     kill_roi_vals = []
+    brightness_vals = []
+    flow_vals = []
+    hud_vals: dict = {name: [] for name in hud_regions}
 
     idx = 0
     for frame in frame_iter:
@@ -167,21 +186,39 @@ def _analyze_from_frame_stream(frame_iter, sample_fps: float, duration_sec: floa
         roi_gray = gray[ry0:ry1, rx0:rx1]
 
         times.append(idx / sample_fps)
+        brightness_vals.append(float(gray.mean()))
 
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray).astype(np.float32) / 255.0
             motion_vals.append(float(diff.mean()))
             hist_diff = cv2.compareHist(hist.astype(np.float32), prev_hist.astype(np.float32), cv2.HISTCMP_BHATTACHARYYA)
             scene_vals.append(float(hist_diff))
+            if compute_optical_flow:
+                flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 2, 15, 2, 5, 1.1, 0)
+                flow_vals.append(float(np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean()))
+            else:
+                flow_vals.append(0.0)
         else:
             motion_vals.append(0.0)
             scene_vals.append(0.0)
+            flow_vals.append(0.0)
 
         if roi_gray.size and prev_roi_gray is not None and roi_gray.shape == prev_roi_gray.shape:
             roi_diff = cv2.absdiff(roi_gray, prev_roi_gray).astype(np.float32) / 255.0
             kill_roi_vals.append(float(roi_diff.mean()))
         else:
             kill_roi_vals.append(0.0)
+
+        for name, (hx0f, hy0f, hx1f, hy1f) in hud_regions.items():
+            hx0, hx1 = int(hx0f * w), int(hx1f * w)
+            hy0, hy1 = int(hy0f * h), int(hy1f * h)
+            crop = gray[hy0:hy1, hx0:hx1]
+            prev_crop = prev_hud_crops.get(name)
+            if crop.size and prev_crop is not None and crop.shape == prev_crop.shape:
+                hud_vals[name].append(float(cv2.absdiff(crop, prev_crop).astype(np.float32).mean()) / 255.0)
+            else:
+                hud_vals[name].append(0.0)
+            prev_hud_crops[name] = crop if crop.size else None
 
         prev_gray = gray
         prev_hist = hist
@@ -193,6 +230,10 @@ def _analyze_from_frame_stream(frame_iter, sample_fps: float, duration_sec: floa
                                scene_cut_score=np.array([]), duration_sec=duration_sec,
                                kill_roi_activity=np.array([]), decode_method=decode_method)
 
+    brightness = np.array(brightness_vals, dtype=np.float32)
+    brightness_delta = np.zeros_like(brightness)
+    brightness_delta[1:] = np.abs(np.diff(brightness))
+
     return VisualFeatures(
         times=np.array(times, dtype=np.float32),
         motion_score=_norm01(np.array(motion_vals, dtype=np.float32)),
@@ -200,6 +241,9 @@ def _analyze_from_frame_stream(frame_iter, sample_fps: float, duration_sec: floa
         duration_sec=duration_sec,
         kill_roi_activity=_norm01(np.array(kill_roi_vals, dtype=np.float32)),
         decode_method=decode_method,
+        brightness_spike=_norm01(brightness_delta),
+        hud_regions_activity={name: _norm01(np.array(vals, dtype=np.float32)) for name, vals in hud_vals.items()},
+        optical_flow_score=_norm01(np.array(flow_vals, dtype=np.float32)) if compute_optical_flow else np.array([]),
     )
 
 
@@ -211,6 +255,8 @@ def analyze_visual(
     video_info=None,
     progress_cb: ProgressCB1 = None,
     cancel_check: CancelCheck = None,
+    hud_regions: Optional[dict] = None,
+    compute_optical_flow: bool = False,
 ) -> VisualFeatures:
     """Muestrea el video a `sample_fps` (decodificado y reducido por
     FFmpeg, GPU si está disponible) y calcula diferencia de frames.
@@ -229,7 +275,8 @@ def analyze_visual(
     info = video_info or validate_and_probe(video_path)
     src_w, src_h = info.width, info.height
     if src_w <= 0 or src_h <= 0:
-        return _analyze_visual_cv2(video_path, sample_fps=sample_fps, resize_w=resize_w)
+        return _analyze_visual_cv2(video_path, sample_fps=sample_fps, resize_w=resize_w,
+                                    hud_regions=hud_regions, compute_optical_flow=compute_optical_flow)
 
     resize_h = max(2, int(round(resize_w * src_h / src_w / 2)) * 2)
     expected_frames = int(info.duration_sec * sample_fps) + 1 if info.duration_sec > 0 else None
@@ -250,7 +297,8 @@ def analyze_visual(
                 expected_frames=expected_frames, progress_cb=progress_cb, cancel_check=cancel_check,
             )
             method = "gpu" if attempt["use_gpu"] else "cpu"
-            result = _analyze_from_frame_stream(frame_iter, sample_fps, info.duration_sec, method)
+            result = _analyze_from_frame_stream(frame_iter, sample_fps, info.duration_sec, method,
+                                                 hud_regions=hud_regions, compute_optical_flow=compute_optical_flow)
             if progress_cb:
                 progress_cb(1.0)
             return result
@@ -264,7 +312,8 @@ def analyze_visual(
     # último recurso: el loop clásico con OpenCV (más lento, pero siempre
     # ha funcionado, incluso si algo raro pasa con el pipe de FFmpeg)
     try:
-        result = _analyze_visual_cv2(video_path, sample_fps=sample_fps, resize_w=resize_w)
+        result = _analyze_visual_cv2(video_path, sample_fps=sample_fps, resize_w=resize_w,
+                                      hud_regions=hud_regions, compute_optical_flow=compute_optical_flow)
         if progress_cb:
             progress_cb(1.0)
         return result
@@ -275,7 +324,9 @@ def analyze_visual(
 
 
 def _analyze_visual_cv2(video_path: str, sample_fps: float = DEFAULT_SAMPLE_FPS,
-                         resize_w: int = DEFAULT_RESIZE_W) -> VisualFeatures:
+                         resize_w: int = DEFAULT_RESIZE_W,
+                         hud_regions: Optional[dict] = None,
+                         compute_optical_flow: bool = False) -> VisualFeatures:
     """Implementación original basada en OpenCV VideoCapture: decodifica
     TODOS los frames originales (grab() por cada uno) y solo procesa 1 de
     cada `step`. Correcta pero mucho más lenta que `_sample_frames_ffmpeg`
@@ -292,14 +343,19 @@ def _analyze_visual_cv2(video_path: str, sample_fps: float = DEFAULT_SAMPLE_FPS,
     step = max(1, int(round(src_fps / sample_fps)))
 
     roi_x0f, roi_y0f, roi_x1f, roi_y1f = KILL_FEED_ROI_FRAC
+    hud_regions = hud_regions or {}
 
     prev_gray = None
     prev_hist = None
     prev_roi_gray = None
+    prev_hud_crops: dict = {}
     times = []
     motion_vals = []
     scene_vals = []
     kill_roi_vals = []
+    brightness_vals = []
+    flow_vals = []
+    hud_vals: dict = {name: [] for name in hud_regions}
 
     frame_idx = 0
     while True:
@@ -325,21 +381,38 @@ def _analyze_visual_cv2(video_path: str, sample_fps: float = DEFAULT_SAMPLE_FPS,
 
             t = frame_idx / src_fps
             times.append(t)
+            brightness_vals.append(float(gray.mean()))
 
             if prev_gray is not None:
                 diff = cv2.absdiff(gray, prev_gray).astype(np.float32) / 255.0
                 motion_vals.append(float(diff.mean()))
                 hist_diff = cv2.compareHist(hist.astype(np.float32), prev_hist.astype(np.float32), cv2.HISTCMP_BHATTACHARYYA)
                 scene_vals.append(float(hist_diff))
+                if compute_optical_flow:
+                    flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 2, 15, 2, 5, 1.1, 0)
+                    flow_vals.append(float(np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean()))
+                else:
+                    flow_vals.append(0.0)
             else:
                 motion_vals.append(0.0)
                 scene_vals.append(0.0)
+                flow_vals.append(0.0)
 
             if roi_gray is not None and prev_roi_gray is not None and roi_gray.shape == prev_roi_gray.shape:
                 roi_diff = cv2.absdiff(roi_gray, prev_roi_gray).astype(np.float32) / 255.0
                 kill_roi_vals.append(float(roi_diff.mean()))
             else:
                 kill_roi_vals.append(0.0)
+
+            for name, (hx0f, hy0f, hx1f, hy1f) in hud_regions.items():
+                hcrop = frame[int(hy0f * h):int(hy1f * h), int(hx0f * w):int(hx1f * w)]
+                hcrop_gray = cv2.cvtColor(hcrop, cv2.COLOR_BGR2GRAY) if hcrop.size else None
+                prev_crop = prev_hud_crops.get(name)
+                if hcrop_gray is not None and prev_crop is not None and hcrop_gray.shape == prev_crop.shape:
+                    hud_vals[name].append(float(cv2.absdiff(hcrop_gray, prev_crop).astype(np.float32).mean()) / 255.0)
+                else:
+                    hud_vals[name].append(0.0)
+                prev_hud_crops[name] = hcrop_gray
 
             prev_gray = gray
             prev_hist = hist
@@ -353,6 +426,10 @@ def _analyze_visual_cv2(video_path: str, sample_fps: float = DEFAULT_SAMPLE_FPS,
                                scene_cut_score=np.array([]), duration_sec=duration_sec,
                                kill_roi_activity=np.array([]), decode_method="cpu_cv2")
 
+    brightness = np.array(brightness_vals, dtype=np.float32)
+    brightness_delta = np.zeros_like(brightness)
+    brightness_delta[1:] = np.abs(np.diff(brightness))
+
     return VisualFeatures(
         times=np.array(times, dtype=np.float32),
         motion_score=_norm01(np.array(motion_vals, dtype=np.float32)),
@@ -360,4 +437,7 @@ def _analyze_visual_cv2(video_path: str, sample_fps: float = DEFAULT_SAMPLE_FPS,
         duration_sec=duration_sec,
         kill_roi_activity=_norm01(np.array(kill_roi_vals, dtype=np.float32)),
         decode_method="cpu_cv2",
+        brightness_spike=_norm01(brightness_delta),
+        hud_regions_activity={name: _norm01(np.array(vals, dtype=np.float32)) for name, vals in hud_vals.items()},
+        optical_flow_score=_norm01(np.array(flow_vals, dtype=np.float32)) if compute_optical_flow else np.array([]),
     )

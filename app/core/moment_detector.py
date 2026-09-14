@@ -35,10 +35,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import audio_analysis, visual_analysis, scoring, kill_events, analysis_cache
+from . import audio_analysis, visual_analysis, scoring, kill_events, gaming_events, analysis_cache
+from .games import get_profile
 from .proc_utils import AnalysisCancelled, CancelCheck, check_cancel
 from .video_io import VideoInfo, validate_and_probe
-from .scoring import Moment, ScoreWeights
+from .scoring import Moment, ScoreWeights, GamingScoreWeights
 
 ProgressCB = Optional[Callable[[str, float], None]]  # (clave de etapa i18n, 0..1)
 
@@ -85,6 +86,8 @@ def run_full_analysis(
     clip_len_options: tuple[int, ...] = (15, 30, 45, 60),
     max_moments: int = 15,
     mode: AnalysisMode = FAST_MODE,
+    detection_mode: str = "general",   # "general" | "gaming"
+    game_key: str = "auto",             # ver app/core/games/ - solo relevante si detection_mode="gaming"
     progress_cb: ProgressCB = None,
     cancel_check: CancelCheck = None,
     use_cache: bool = True,
@@ -93,13 +96,17 @@ def run_full_analysis(
         if progress_cb:
             progress_cb(stage, frac)
 
+    is_gaming = detection_mode == "gaming"
+    game_profile = get_profile(game_key) if is_gaming else None
+
     check_cancel(cancel_check)
     report("stage.validating", 0.0)
     info = validate_and_probe(video_path)
     check_cancel(cancel_check)
 
     if use_cache:
-        cached = analysis_cache.load(video_path, mode, clip_len_options, max_moments)
+        cached = analysis_cache.load(video_path, mode, clip_len_options, max_moments,
+                                      detection_mode=detection_mode, game_key=game_key)
         if cached is not None:
             report("stage.loaded_from_cache", 1.0)
             cached.from_cache = True
@@ -128,8 +135,11 @@ def run_full_analysis(
 
         f_audio = pool.submit(_do_audio)
         f_visual = pool.submit(
-            visual_analysis.analyze_visual, video_path, mode.sample_fps, mode.resize_w,
-            True, info, _visual_progress, cancel_check,
+            visual_analysis.analyze_visual, video_path,
+            sample_fps=mode.sample_fps, resize_w=mode.resize_w, use_gpu=True,
+            video_info=info, progress_cb=_visual_progress, cancel_check=cancel_check,
+            hud_regions=(game_profile.hud_regions if game_profile else None),
+            compute_optical_flow=is_gaming,
         )
 
         # OJO: si cualquiera de los dos lanza AnalysisCancelled, se relanza
@@ -159,32 +169,50 @@ def run_full_analysis(
 
     report("stage.detecting_kills", 0.75)
     kill_feats = None
+    gaming_feats = None
     try:
-        kill_feats = kill_events.build_kill_feed_features(
-            video_path, audio_feats, visual_feats,
-            max_ocr_candidates=mode.max_ocr_candidates, cancel_check=cancel_check,
-        )
+        if is_gaming:
+            gaming_feats = gaming_events.build_gaming_features(
+                video_path, audio_feats, visual_feats, game_profile, cancel_check=cancel_check,
+            )
+        else:
+            kill_feats = kill_events.build_kill_feed_features(
+                video_path, audio_feats, visual_feats,
+                max_ocr_candidates=mode.max_ocr_candidates, cancel_check=cancel_check,
+            )
     except AnalysisCancelled:
         raise
     except Exception:
-        kill_feats = None  # best-effort: si falla, el análisis sigue con las señales genéricas
+        # best-effort: si falla, el análisis sigue con las señales genéricas
+        kill_feats = None
+        gaming_feats = None
     check_cancel(cancel_check)
 
     report("stage.scoring", 0.92)
-    kill_times = kill_feats.times if kill_feats is not None else None
-    kill_activity = kill_feats.kill_activity if kill_feats is not None else None
-    grid, score = scoring.build_unified_score(
-        audio_feats, visual_feats, kill_times=kill_times, kill_activity=kill_activity,
-        weights=ScoreWeights(),
-    )
-
-    kill_event_times = [e.time for e in kill_feats.events] if kill_feats is not None else None
+    if is_gaming:
+        grid, score = scoring.build_gaming_score(
+            audio_feats, visual_feats, gaming_feats, weights=GamingScoreWeights(),
+        )
+    else:
+        kill_times = kill_feats.times if kill_feats is not None else None
+        kill_activity = kill_feats.kill_activity if kill_feats is not None else None
+        grid, score = scoring.build_unified_score(
+            audio_feats, visual_feats, kill_times=kill_times, kill_activity=kill_activity,
+            weights=ScoreWeights(),
+        )
 
     report("stage.selecting_moments", 0.96)
-    moments = scoring.find_top_moments(
-        grid, score, clip_len_options=clip_len_options, max_moments=max_moments,
-        kill_event_times=kill_event_times,
-    )
+    if is_gaming:
+        moments = scoring.find_top_gaming_moments(
+            grid, score, gaming_feats=gaming_feats,
+            clip_len_options=clip_len_options, max_moments=max_moments,
+        )
+    else:
+        kill_event_times = [e.time for e in kill_feats.events] if kill_feats is not None else None
+        moments = scoring.find_top_moments(
+            grid, score, clip_len_options=clip_len_options, max_moments=max_moments,
+            kill_event_times=kill_event_times,
+        )
     for m in moments:
         scoring.tag_reasons(m, audio_feats, visual_feats)
 
@@ -200,5 +228,6 @@ def run_full_analysis(
         action_score=score,
     )
     if use_cache:
-        analysis_cache.save(video_path, mode, clip_len_options, max_moments, result)
+        analysis_cache.save(video_path, mode, clip_len_options, max_moments, result,
+                             detection_mode=detection_mode, game_key=game_key)
     return result

@@ -18,10 +18,13 @@ Uso:
 
 Los nombres propios (Puppywill AI Clipper, FFmpeg, GPU, NVDEC, NVENC,
 CapCut, Tesseract OCR), los formatos (9:16, 16:9, 1:1, MP4/MKV/MOV) y
-las etiquetas de calidad de un clip (Kill, Multikill, Best Play,
-Reaction, Intense Fight - vocabulario fijo elegido a propósito en
-inglés) NUNCA se traducen: no tienen entradas en este catálogo, se usan
-literales donde aparecen.
+las etiquetas de calidad de un clip (Kill, Multikill, Killstreak,
+Ultimate, Round End, Best Play, Reaction, Intense Fight - vocabulario
+fijo elegido a propósito en inglés) NUNCA se traducen: no tienen
+entradas en este catálogo, se usan literales donde aparecen. Lo mismo
+aplica a "General"/"Gaming" (el selector de modo de detección) y a
+"Marvel Rivals" (nombre del juego), que sí tienen entrada en el
+catálogo pero con el mismo texto en los 3 idiomas a propósito.
 """
 from __future__ import annotations
 
@@ -92,12 +95,32 @@ _ES: dict[str, str] = {
     "label.max_moments": "Máx. momentos:",
     "label.mode": "Modo:",
     "label.language": "Idioma / Language",
-    "tooltip.mode": (
+    "tooltip.detection_mode": (
+        "General: detecta picos de audio, risas, movimiento y cortes de escena.\n"
+        "Gaming: además detecta kills, ultimates, rachas y fin de ronda en videojuegos."
+    ),
+    "mode.general": "General",
+    "mode.gaming": "Gaming",
+
+    "label.speed_mode": "Velocidad:",
+    "tooltip.speed_mode": (
         "Rápido: decodificación GPU + menos muestras/candidatos OCR - recomendado.\n"
         "Preciso: más muestras por segundo y más candidatos OCR, más lento."
     ),
     "mode.fast": "Rápido",
     "mode.precise": "Preciso",
+
+    "label.game": "Juego:",
+    "game.auto": "Detectar automáticamente",
+    "game.marvel_rivals": "Marvel Rivals",
+    "game.other": "Otro",
+
+    "label.find_specific": "Buscar momentos específicos (opcional):",
+    "placeholder.find_specific": "Ej: mis mejores kills jugando Capitán América",
+    "tooltip.find_specific": (
+        "Filtra los momentos ya detectados por palabras clave (kills, ultimate, "
+        "victory...). No es comprensión de lenguaje natural."
+    ),
 
     "btn.analyze": "⚡  Analizar Stream",
     "btn.cancel_analysis": "✕  Cancelar análisis",
@@ -201,12 +224,32 @@ _EN: dict[str, str] = {
     "label.max_moments": "Max. moments:",
     "label.mode": "Mode:",
     "label.language": "Idioma / Language",
-    "tooltip.mode": (
+    "tooltip.detection_mode": (
+        "General: detects audio peaks, laughter, motion and scene cuts.\n"
+        "Gaming: also detects kills, ultimates, streaks and round endings in games."
+    ),
+    "mode.general": "General",
+    "mode.gaming": "Gaming",
+
+    "label.speed_mode": "Speed:",
+    "tooltip.speed_mode": (
         "Fast: GPU decoding + fewer samples/OCR candidates - recommended.\n"
         "Precise: more samples per second and more OCR candidates, slower."
     ),
     "mode.fast": "Fast",
     "mode.precise": "Precise",
+
+    "label.game": "Game:",
+    "game.auto": "Auto Detect",
+    "game.marvel_rivals": "Marvel Rivals",
+    "game.other": "Other",
+
+    "label.find_specific": "Find specific moments (optional):",
+    "placeholder.find_specific": "E.g: my best kills while playing Captain America",
+    "tooltip.find_specific": (
+        "Filters already-detected moments by keyword (kills, ultimate, victory...). "
+        "Not full natural-language understanding."
+    ),
 
     "btn.analyze": "⚡  Analyze Stream",
     "btn.cancel_analysis": "✕  Cancel analysis",
@@ -310,12 +353,32 @@ _PT: dict[str, str] = {
     "label.max_moments": "Máx. momentos:",
     "label.mode": "Modo:",
     "label.language": "Idioma / Language",
-    "tooltip.mode": (
+    "tooltip.detection_mode": (
+        "Geral: detecta picos de áudio, risadas, movimento e cortes de cena.\n"
+        "Gaming: também detecta abates, ultimates, sequências e fim de rodada em jogos."
+    ),
+    "mode.general": "General",
+    "mode.gaming": "Gaming",
+
+    "label.speed_mode": "Velocidade:",
+    "tooltip.speed_mode": (
         "Rápido: decodificação por GPU + menos amostras/candidatos OCR - recomendado.\n"
         "Preciso: mais amostras por segundo e mais candidatos OCR, mais lento."
     ),
     "mode.fast": "Rápido",
     "mode.precise": "Preciso",
+
+    "label.game": "Jogo:",
+    "game.auto": "Detecção automática",
+    "game.marvel_rivals": "Marvel Rivals",
+    "game.other": "Outro",
+
+    "label.find_specific": "Buscar momentos específicos (opcional):",
+    "placeholder.find_specific": "Ex: meus melhores abates jogando Capitão América",
+    "tooltip.find_specific": (
+        "Filtra os momentos já detectados por palavra-chave (kills, ultimate, "
+        "victory...). Não é compreensão de linguagem natural."
+    ),
 
     "btn.analyze": "⚡  Analisar Stream",
     "btn.cancel_analysis": "✕  Cancelar análise",

@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QListWidget, QListWidgetItem, QProgressBar, QComboBox,
     QCheckBox, QSlider, QMessageBox, QSplitter,
-    QGroupBox, QFormLayout, QSpinBox,
+    QGroupBox, QFormLayout, QSpinBox, QLineEdit,
 )
 
 try:
@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         self.video_path: str | None = None
         self.video_info = None
         self.analysis_result = None
+        self.displayed_moments: list = []
         self.work_dir = tempfile.mkdtemp(prefix="puppywill_")
         self.current_moment_index: int | None = None
         self.trim_start = 0.0
@@ -260,10 +261,38 @@ class MainWindow(QMainWindow):
         self.combo_mode.addItem(i18n.t("mode.fast"), FAST_MODE.key)
         self.combo_mode.addItem(i18n.t("mode.precise"), PRECISE_MODE.key)
         self.combo_mode.setCurrentIndex(0)
-        self._reg(self.combo_mode, "tooltip.mode", method="setToolTip")
-        lbl_mode = self._reg(QLabel(), "label.mode")
-        form.addRow(lbl_mode, self.combo_mode)
+        self._reg(self.combo_mode, "tooltip.speed_mode", method="setToolTip")
+        lbl_speed_mode = self._reg(QLabel(), "label.speed_mode")
+        form.addRow(lbl_speed_mode, self.combo_mode)
+
+        # Modo de detección (General/Gaming) - independiente de Rápido/Preciso
+        # arriba (eso es velocidad de muestreo, esto es QUÉ se detecta).
+        self.combo_detection_mode = QComboBox()
+        self.combo_detection_mode.addItem(i18n.t("mode.general"), "general")
+        self.combo_detection_mode.addItem(i18n.t("mode.gaming"), "gaming")
+        self.combo_detection_mode.setCurrentIndex(0)
+        self._reg(self.combo_detection_mode, "tooltip.detection_mode", method="setToolTip")
+        self.combo_detection_mode.currentIndexChanged.connect(self.on_detection_mode_changed)
+        lbl_detection_mode = self._reg(QLabel(), "label.mode")
+        form.addRow(lbl_detection_mode, self.combo_detection_mode)
+
+        # Solo visibles con Gaming - ver on_detection_mode_changed()
+        self.combo_game = QComboBox()
+        self.combo_game.addItem(i18n.t("game.auto"), "auto")
+        self.combo_game.addItem(i18n.t("game.marvel_rivals"), "marvel_rivals")
+        self.combo_game.addItem(i18n.t("game.other"), "other")
+        self.combo_game.setCurrentIndex(0)
+        self.lbl_game = self._reg(QLabel(), "label.game")
+        form.addRow(self.lbl_game, self.combo_game)
+
+        self.edit_find_specific = QLineEdit()
+        self._reg(self.edit_find_specific, "placeholder.find_specific", method="setPlaceholderText")
+        self._reg(self.edit_find_specific, "tooltip.find_specific", method="setToolTip")
+        self.lbl_find_specific = self._reg(QLabel(), "label.find_specific")
+        form.addRow(self.lbl_find_specific, self.edit_find_specific)
+
         lay.addLayout(form)
+        self._update_gaming_controls_visibility()
 
         # "Idioma / Language" queda igual en los 3 idiomas a propósito
         # (es el propio selector de idioma, debe ser autoexplicativo sin
@@ -313,6 +342,27 @@ class MainWindow(QMainWindow):
         self.combo_mode.setItemText(0, i18n.t("mode.fast"))
         self.combo_mode.setItemText(1, i18n.t("mode.precise"))
         self.combo_mode.blockSignals(False)
+
+        self.combo_detection_mode.blockSignals(True)
+        self.combo_detection_mode.setItemText(0, i18n.t("mode.general"))
+        self.combo_detection_mode.setItemText(1, i18n.t("mode.gaming"))
+        self.combo_detection_mode.blockSignals(False)
+
+        self.combo_game.blockSignals(True)
+        self.combo_game.setItemText(0, i18n.t("game.auto"))
+        self.combo_game.setItemText(1, i18n.t("game.marvel_rivals"))
+        self.combo_game.setItemText(2, i18n.t("game.other"))
+        self.combo_game.blockSignals(False)
+
+    def on_detection_mode_changed(self, _index: int = -1):
+        self._update_gaming_controls_visibility()
+
+    def _update_gaming_controls_visibility(self):
+        is_gaming = self.combo_detection_mode.currentData() == "gaming"
+        self.lbl_game.setVisible(is_gaming)
+        self.combo_game.setVisible(is_gaming)
+        self.lbl_find_specific.setVisible(is_gaming)
+        self.edit_find_specific.setVisible(is_gaming)
 
     def _section_title(self, key: str) -> QLabel:
         lbl = self._reg(QLabel(), key)
@@ -512,12 +562,16 @@ class MainWindow(QMainWindow):
         self._analysis_start_time = time.monotonic()
 
         mode = MODES.get(self.combo_mode.currentData(), FAST_MODE)
+        detection_mode = self.combo_detection_mode.currentData() or "general"
+        game_key = self.combo_game.currentData() if detection_mode == "gaming" else "auto"
         self.worker = AnalysisWorker(
             video_path=self.video_path,
             work_dir=self.work_dir,
             clip_len_options=(15, 30, 45, 60),
             max_moments=self.spin_max_moments.value(),
             mode=mode,
+            detection_mode=detection_mode,
+            game_key=game_key or "auto",
         )
         self.worker.progress.connect(self.on_analysis_progress)
         self.worker.finished_ok.connect(self.on_analysis_finished)
@@ -547,6 +601,25 @@ class MainWindow(QMainWindow):
         self.btn_cancel_analysis.setVisible(False)
         self.btn_cancel_analysis.setEnabled(True)
 
+    def _filter_moments_by_query(self, moments: list, query: str) -> list:
+        """v1 sin NLP: filtro simple de palabras clave contra las etiquetas
+        (`reasons`) ya asignadas a cada momento - no interpreta lenguaje
+        natural. Si el filtro no deja nada (p.ej. la query no coincide con
+        ningún tag conocido), se muestran todos los momentos igual, para no
+        dejar al usuario con la lista vacía por una consulta demasiado
+        específica."""
+        keywords = [w for w in query.lower().split() if len(w) >= 3]
+        if not keywords:
+            return moments
+        filtered = [
+            m for m in moments
+            if any(
+                kw in reason.lower() or reason.lower() in kw
+                for reason in m.reasons for kw in keywords
+            )
+        ]
+        return filtered if filtered else moments
+
     def on_analysis_finished(self, result):
         self._analysis_ui_reset()
         self.analysis_result = result
@@ -557,17 +630,23 @@ class MainWindow(QMainWindow):
         self.selected_moment_indices = set()
         self._moment_widgets = []
         self.moment_list.clear()
-        for i, m in enumerate(result.moments):
+        moments = result.moments
+        if self.combo_detection_mode.currentData() == "gaming":
+            query = self.edit_find_specific.text().strip()
+            if query:
+                moments = self._filter_moments_by_query(moments, query)
+        for i, m in enumerate(moments):
             item = QListWidgetItem()
             widget = MomentListItemWidget(m, i, on_toggle=self._on_moment_checkbox_toggled)
             item.setSizeHint(widget.sizeHint())
             self.moment_list.addItem(item)
             self.moment_list.setItemWidget(item, widget)
             self._moment_widgets.append(widget)
+        self.displayed_moments = moments
         self._update_export_selected_button()
         status_key = "status.moments_found_cached" if getattr(result, "from_cache", False) else "status.moments_found"
-        self._set_status(status_key, n=len(result.moments))
-        if not result.moments:
+        self._set_status(status_key, n=len(moments))
+        if not moments:
             QMessageBox.information(self, APP_NAME, i18n.t("status.no_moments_found"))
 
     def on_analysis_failed(self, error: str):
@@ -613,7 +692,7 @@ class MainWindow(QMainWindow):
             return
         index = self.moment_list.row(item)
         self.current_moment_index = index
-        moment = self.analysis_result.moments[index]
+        moment = self.displayed_moments[index]
 
         dur = self.video_info.duration_sec if self.video_info else moment.end + 60
         self.slider_start.setRange(0, int(dur))
@@ -853,7 +932,7 @@ class MainWindow(QMainWindow):
 
         jobs: list[BatchExportJob] = []
         for idx in indices:
-            moment = self.analysis_result.moments[idx]
+            moment = self.displayed_moments[idx]
             start_f, _ = scoring.compute_clip_window(
                 moment.peak_time, length_sec, video_duration, self._action_grid, self._action_score
             )
@@ -927,7 +1006,7 @@ class MainWindow(QMainWindow):
         data = project_mod.ProjectData(
             video_path=self.video_path,
             video_duration_sec=self.video_info.duration_sec,
-            moments=[project_mod.moment_to_dict(m) for m in self.analysis_result.moments],
+            moments=[project_mod.moment_to_dict(m) for m in self.displayed_moments],
         )
         project_mod.save_project(data, path)
         QMessageBox.information(self, APP_NAME, i18n.t("info.project_saved"))

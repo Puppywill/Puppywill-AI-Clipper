@@ -27,10 +27,12 @@ CACHE_DIR = get_app_data_dir() / "analysis_cache"
 
 
 def _cache_key(video_path: str, size_bytes: int, mtime: float, mode_key: str,
-               sample_fps: float, resize_w: int, clip_len_options: tuple, max_moments: int) -> str:
+               sample_fps: float, resize_w: int, clip_len_options: tuple, max_moments: int,
+               detection_mode: str = "general", game_key: str = "auto") -> str:
     raw = "|".join([
         str(Path(video_path).resolve()), str(size_bytes), str(mtime), mode_key,
-        str(sample_fps), str(resize_w), str(clip_len_options), str(max_moments), f"v{CACHE_VERSION}",
+        str(sample_fps), str(resize_w), str(clip_len_options), str(max_moments),
+        detection_mode, game_key, f"v{CACHE_VERSION}",
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
@@ -39,14 +41,18 @@ def _cache_path(key: str) -> Path:
     return CACHE_DIR / f"{key}.pkl"
 
 
-def load(video_path: str, mode, clip_len_options: tuple, max_moments: int):
+def load(video_path: str, mode, clip_len_options: tuple, max_moments: int,
+         detection_mode: str = "general", game_key: str = "auto"):
     """Devuelve el AnalysisResult cacheado, o None si no hay caché válido
     para este archivo+ajustes (nunca lanza: un caché corrupto o de una
-    versión vieja simplemente se ignora y se re-analiza)."""
+    versión vieja simplemente se ignora y se re-analiza). `detection_mode`/
+    `game_key` forman parte de la clave para que General/Gaming (y distintos
+    juegos) nunca compartan caché entre sí por error."""
     try:
         st = Path(video_path).stat()
         key = _cache_key(video_path, st.st_size, st.st_mtime, mode.key,
-                          mode.sample_fps, mode.resize_w, clip_len_options, max_moments)
+                          mode.sample_fps, mode.resize_w, clip_len_options, max_moments,
+                          detection_mode, game_key)
         path = _cache_path(key)
         if not path.is_file():
             return None
@@ -56,13 +62,15 @@ def load(video_path: str, mode, clip_len_options: tuple, max_moments: int):
         return None
 
 
-def save(video_path: str, mode, clip_len_options: tuple, max_moments: int, result) -> None:
+def save(video_path: str, mode, clip_len_options: tuple, max_moments: int, result,
+         detection_mode: str = "general", game_key: str = "auto") -> None:
     """Guarda el resultado; si falla (disco lleno, permisos), no rompe el
     análisis - simplemente la próxima vez no habrá caché."""
     try:
         st = Path(video_path).stat()
         key = _cache_key(video_path, st.st_size, st.st_mtime, mode.key,
-                          mode.sample_fps, mode.resize_w, clip_len_options, max_moments)
+                          mode.sample_fps, mode.resize_w, clip_len_options, max_moments,
+                          detection_mode, game_key)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path = _cache_path(key)
         tmp_path = path.with_suffix(".tmp")
