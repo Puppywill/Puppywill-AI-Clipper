@@ -19,7 +19,7 @@
 ; nunca dentro de la carpeta de instalación.
 
 #define MyAppName "Puppywill AI Clipper"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0-beta.1"
 #define MyAppPublisher "Puppywill"
 #define MyAppURL "https://github.com/Puppywill/Puppywill-AI-Clipper"
 #define MyAppExeName "PuppywillAIClipper.exe"
