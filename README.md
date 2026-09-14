@@ -142,6 +142,53 @@ instalador? Sigue la sección [📦 Instalación](#-instalación) más abajo.
   resultado se carga al instante en vez de repetir el análisis completo.
 - **Guardar/cargar proyecto** (`.pwproj`) para retomar el trabajo después.
 
+## 🎮 Modo Gaming (beta)
+
+Además del modo de análisis General descrito arriba, hay un selector
+**Mode: General / Gaming** en la barra lateral pensado para gameplay y
+streams de videojuegos, donde los mejores momentos no siempre coinciden
+con que el streamer esté hablando.
+
+- **General**: el modo de siempre — picos de audio, risas, movimiento y
+  cortes de escena, más el "ding" de kill por audio. Pensado para
+  cualquier tipo de video, no solo gaming.
+- **Gaming**: pensado para encontrar las mejores jugadas de una partida
+  aunque ocurran en silencio. Combina varias señales a la vez —
+  actividad del HUD (kill feed, barra de ultimate, banner de fin de
+  ronda), brillo/flashes de pantalla completa, optical flow (movimiento
+  real de cámara/combate, no solo ruido de píxeles), y firmas de audio
+  distintas para kill / ultimate / fin de ronda — y suma un **bonus de
+  coincidencia** cuando 2 o más señales caen juntas en el mismo instante.
+  Etiqueta los momentos como Kill, Multikill, Killstreak, Ultimate,
+  Round End, Best Play, Intense Fight y Reaction. Al elegir Gaming
+  aparece un selector **Game: Auto Detect / Marvel Rivals / Other** para
+  cargar (opcionalmente) ajustes específicos del HUD de ese juego.
+- **Marvel Rivals está en fase de calibración.** Las regiones del HUD
+  (barra de ultimate, banner de ronda) y los pesos de puntuación son
+  valores iniciales razonables, no medidos aún contra grabaciones reales
+  — la idea es afinarlos con clips cortos reales antes de confiar en
+  ellos para partidas largas. "Auto Detect"/"Other" usan una detección
+  más genérica (sin suposiciones de posición del HUD) y funcionan con
+  cualquier juego, con menos precisión en las señales específicas de
+  ultimate/ronda.
+- **"Find specific moments" (opcional)** es, en esta primera versión, un
+  filtro simple por palabras clave sobre las etiquetas ya detectadas
+  (por ejemplo "kills" o "ultimate") — **no** es comprensión de lenguaje
+  natural. No intenta entender frases completas ni identificar personajes
+  o jugadas concretas; solo reduce la lista de momentos a los que
+  mencionan esas palabras, y si no encuentra ninguna coincidencia
+  muestra todos los momentos igual, para no dejarte con la lista vacía.
+- **Los resultados pueden variar** según la resolución y el encuadre del
+  video, la posición/idioma del HUD del juego, y si el audio del
+  micrófono y del juego vienen mezclados en una sola pista o en pistas
+  separadas (grabar con una pista de mic aparte en OBS permite, a
+  futuro, aislar mejor las reacciones — hoy el análisis usa la mezcla
+  combinada si es lo único disponible). El reconocimiento de texto en
+  pantalla (OCR, opcional) depende de que Tesseract esté instalado y de
+  que la fuente del juego sea legible; en juegos con tipografías muy
+  estilizadas puede no detectar nada, y el resto de las señales
+  (audio, HUD, brillo, optical flow) siguen funcionando igual.
+
 ## 📋 Requisitos
 
 Si usas el [instalador](#download-for-windows) no necesitas nada de esto
