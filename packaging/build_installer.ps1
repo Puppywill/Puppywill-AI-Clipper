@@ -1,10 +1,19 @@
-# build_installer.ps1
+# build_installer.ps1 (rama feature/gaming-mode: variante BETA)
 # --------------------
-# Compila el instalador de Windows para Puppywill AI Clipper:
+# Compila el instalador de Windows BETA para Puppywill AI Clipper
+# (Gaming Mode):
 #   1. PyInstaller empaqueta main.py + PySide6/OpenCV/NumPy en un .exe.
 #   2. Copia FFmpeg/FFprobe portables junto al .exe (para que la app
 #      funcione sin que el usuario instale FFmpeg aparte).
-#   3. Inno Setup compila todo eso en un único instalador .exe.
+#   3. Deja un archivo marcador BETA_BUILD junto al .exe - app/config.py
+#      lo detecta (_is_beta_build) y usa
+#      %LOCALAPPDATA%\PuppywillAIClipperBeta en vez de la carpeta de la
+#      versión estable, para que ajustes/caché no se mezclen entre
+#      ambas versiones instaladas a la vez.
+#   4. Inno Setup (packaging\installer.iss, en esta rama configurado con
+#      AppId/nombre/carpeta propios de la beta) compila todo eso en un
+#      único instalador .exe que puede convivir instalado junto al de
+#      la versión estable v1.0.0 sin pisarlo ni desinstalarlo.
 #
 # Requisitos (no se instalan automáticamente, ver setup_check.py):
 #   - Python 3.10-3.12 con las dependencias de requirements.txt + pyinstaller
@@ -19,7 +28,7 @@
 # Uso:
 #   .\packaging\build_installer.ps1
 #
-# Resultado: dist_installer\Puppywill-AI-Clipper-Setup-v1.0.0.exe
+# Resultado: dist_installer\Puppywill-AI-Clipper-Setup-v1.1.0-beta.1.exe
 
 param(
     [string]$FfmpegBinDir = "$PSScriptRoot\..\build_deps\ffmpeg\bin",
@@ -60,8 +69,12 @@ foreach ($f in @("LICENSE", "README.txt")) {
     if (Test-Path $src) { Copy-Item $src $ffmpegDest -Force }
 }
 
-Write-Host "== 3/3: Compilando instalador con Inno Setup ==" -ForegroundColor Cyan
+Write-Host "== 3/4: Marcando build como BETA ==" -ForegroundColor Cyan
+$betaMarker = Join-Path $root "dist\PuppywillAIClipper\BETA_BUILD"
+Set-Content -Path $betaMarker -Value "Puppywill AI Clipper Beta - ver app/config.py:_is_beta_build" -Encoding utf8
+
+Write-Host "== 4/4: Compilando instalador con Inno Setup ==" -ForegroundColor Cyan
 & $IsccPath (Join-Path $PSScriptRoot "installer.iss")
 if ($LASTEXITCODE -ne 0) { throw "ISCC falló (código $LASTEXITCODE)" }
 
-Write-Host "Listo: dist_installer\Puppywill-AI-Clipper-Setup-v1.0.0.exe" -ForegroundColor Green
+Write-Host "Listo: dist_installer\Puppywill-AI-Clipper-Setup-v1.1.0-beta.1.exe" -ForegroundColor Green

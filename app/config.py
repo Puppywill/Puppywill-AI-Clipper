@@ -9,6 +9,13 @@ máquina (rutas de export, caché de análisis), no algo que deba
 sincronizarse entre equipos de un dominio. Nunca dentro de Program
 Files: el instalador no necesita permisos de administrador para que la
 app pueda escribir aquí.
+
+El instalador BETA (Gaming Mode, packaging/installer.iss en esta rama)
+deja un archivo marcador `BETA_BUILD` junto al .exe (ver
+packaging/build_installer.ps1) para que esta build use
+`%LOCALAPPDATA%\\PuppywillAIClipperBeta` en vez de la carpeta de la
+versión estable - así ambas versiones pueden convivir instaladas sin
+pisarse ajustes ni caché de análisis.
 """
 from __future__ import annotations
 
@@ -19,6 +26,15 @@ from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 
 
+def _is_beta_build() -> bool:
+    if not getattr(sys, "frozen", False):
+        return False
+    return (Path(sys.executable).parent / "BETA_BUILD").exists()
+
+
+APP_DATA_DIR_NAME = "PuppywillAIClipperBeta" if _is_beta_build() else "PuppywillAIClipper"
+
+
 def get_app_data_dir() -> Path:
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
@@ -26,7 +42,7 @@ def get_app_data_dir() -> Path:
         base = str(Path.home() / "Library" / "Application Support")
     else:
         base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    d = Path(base) / "PuppywillAIClipper"
+    d = Path(base) / APP_DATA_DIR_NAME
     d.mkdir(parents=True, exist_ok=True)
     return d
 
